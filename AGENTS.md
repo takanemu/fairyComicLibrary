@@ -28,6 +28,7 @@
   - Vite 6.4.4 or newer security-patched stable release
   - Tailwind CSS 3.4+
   - `@tauri-apps/api` v2.x
+- **配布形式:** AppImage のみ（`tauri.conf.json` の `bundle.targets` は `["appimage"]`、`npm run tauri build` で生成）。WebKitGTK と libwebp は AppImage に同梱される。利用者の環境には `libfuse2`（Ubuntu 24.04 は `libfuse2t64`）が必要。アプリ設定の保存先は identifier（`com.fairycomiclibrary.application`）に依存するため、変更するとリポジトリの再選択が必要になる。
 
 ## 3. Directory Structure
  .
