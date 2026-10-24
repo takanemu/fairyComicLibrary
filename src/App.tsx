@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { LibraryView } from "./components/library/LibraryView";
@@ -39,13 +44,45 @@ type ImportOutcome =
       relativePath: string;
     };
 
+async function notifyImportResult(
+  imported: number,
+  duplicate: number,
+  failed: number,
+  firstFailure: string | null,
+) {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    return;
+  }
+  const parts = [
+    imported > 0 ? `${imported}件を登録` : null,
+    duplicate > 0 ? `${duplicate}件は重複` : null,
+    failed > 0 ? `${failed}件は失敗` : null,
+  ].filter((part) => part !== null);
+  if (parts.length === 0) {
+    return;
+  }
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) {
+      granted = (await requestPermission()) === "granted";
+    }
+    if (granted) {
+      sendNotification({
+        title: failed > 0 ? "インポートが一部失敗しました" : "インポートが完了しました",
+        body: [parts.join("、"), firstFailure].filter(Boolean).join("\n"),
+      });
+    }
+  } catch {
+    // 通知はおまけの機能なので、失敗してもインポート結果には影響させない。
+  }
+}
+
 function App() {
   const [repository, setRepository] = useState<RepositoryStatus | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSelecting, setIsSelecting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [importMessages, setImportMessages] = useState<string[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [view, setView] = useState<LibraryViewId>("all");
   const [searchText, setSearchText] = useState("");
@@ -167,12 +204,13 @@ function App() {
     }
     importingRef.current = true;
     setError(null);
-    setImportMessages([]);
     setIsImporting(true);
 
     try {
-      const messages: string[] = [];
       let importedCount = 0;
+      let duplicateCount = 0;
+      let failedCount = 0;
+      let firstFailure: string | null = null;
 
       for (const path of paths) {
         try {
@@ -180,23 +218,17 @@ function App() {
             path,
           });
           if (outcome.status === "duplicate") {
-            messages.push(
-              `重複をスキップ: ${path}（登録先: ${outcome.relativePath}）`,
-            );
-            continue;
-          }
-
-          importedCount += 1;
-          messages.push(`インポート完了: ${outcome.relativePath}`);
-          if (outcome.warning) {
-            messages.push(outcome.warning);
+            duplicateCount += 1;
+          } else {
+            importedCount += 1;
           }
         } catch (reason) {
-          messages.push(`失敗: ${path} — ${String(reason)}`);
+          failedCount += 1;
+          firstFailure ??= `${path.split("/").pop()}: ${String(reason)}`;
         }
       }
 
-      setImportMessages(messages);
+      void notifyImportResult(importedCount, duplicateCount, failedCount, firstFailure);
       if (importedCount > 0) {
         setRepository((current) =>
           current
@@ -414,19 +446,6 @@ function App() {
               role="alert"
             >
               {error}
-            </div>
-          )}
-
-          {importMessages.length > 0 && (
-            <div
-              aria-live="polite"
-              className="mb-5 max-h-40 space-y-1 overflow-auto rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3 text-xs text-slate-300"
-            >
-              {importMessages.map((message, index) => (
-                <p className="break-all" key={`${index}-${message}`}>
-                  {message}
-                </p>
-              ))}
             </div>
           )}
 
