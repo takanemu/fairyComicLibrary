@@ -288,16 +288,6 @@ function App() {
         </div>
       )}
       <aside className="sticky top-0 flex h-screen w-64 shrink-0 flex-col border-r border-white/5 bg-sidebar px-5 py-6">
-        <div className="mb-12 flex items-center gap-3 px-2">
-          <div className="grid size-9 place-items-center rounded-xl bg-violet-500/15 text-lg text-violet-300">
-            ✦
-          </div>
-          <div>
-            <p className="text-sm font-semibold tracking-wide">Fairy Library</p>
-            <p className="mt-0.5 text-xs text-slate-500">Comic collection</p>
-          </div>
-        </div>
-
         <p className="mb-3 px-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
           ライブラリ
         </p>
