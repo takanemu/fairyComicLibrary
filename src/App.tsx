@@ -357,27 +357,22 @@ function App() {
           <p className="text-xs font-medium text-slate-300">アプリ管理リポジトリ</p>
           {isLoading ? (
             <p className="mt-2 text-xs text-slate-500">状態を確認しています…</p>
-          ) : repository ? (
-            <>
-              <p className="mt-2 break-all text-xs leading-5 text-emerald-300">
-                接続済み
-              </p>
-              <p className="mt-1 break-all text-[11px] leading-4 text-slate-500">
-                {repository.path}
-              </p>
-            </>
-          ) : (
+          ) : repository ? null : (
             <p className="mt-2 text-xs leading-5 text-slate-500">
               リポジトリを選択または新規作成してください。
             </p>
           )}
           <button
-            className="mt-4 w-full rounded-lg border border-white/[0.08] px-3 py-2 text-xs font-medium text-slate-300 transition hover:bg-white/[0.05] disabled:cursor-wait disabled:opacity-50"
+            className={`mt-4 w-full rounded-lg border px-3 py-2 text-xs font-medium transition disabled:cursor-wait disabled:opacity-50 ${
+              repository
+                ? "border-white/[0.08] text-white hover:bg-white/[0.05]"
+                : "border-rose-400/40 text-rose-400 hover:bg-rose-400/10"
+            }`}
             disabled={isSelecting}
             onClick={selectRepository}
             type="button"
           >
-            {isSelecting ? "処理中…" : repository ? "場所を変更" : "場所を選択"}
+            {isSelecting ? "処理中…" : repository ? "場所を変更" : "未登録"}
           </button>
         </div>
       </aside>
