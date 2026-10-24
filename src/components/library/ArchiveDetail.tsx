@@ -53,7 +53,7 @@ export function ArchiveDetail({
   return (
     <aside
       aria-label="アーカイブの詳細"
-      className="fixed bottom-0 right-0 top-[77px] z-40 flex w-80 flex-col overflow-y-auto border-l border-white/[0.07] bg-sidebar p-5 pb-28 shadow-2xl"
+      className="fixed bottom-0 right-0 top-[77px] z-40 flex w-80 flex-col overflow-y-auto border-l border-white/[0.07] bg-black/90 p-5 pb-28 shadow-2xl backdrop-blur-md"
     >
       <div className="relative mb-4 min-h-12">
         {archive.hasThumbnail && (
