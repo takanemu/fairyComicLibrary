@@ -115,7 +115,7 @@ mod tests {
                     "archives/aa/sample.cbz",
                     "cbz",
                     42_i64,
-                    "thumbnails/aa/".to_string() + &"a".repeat(64) + ".avif",
+                    "thumbnails/aa/".to_string() + &"a".repeat(64) + ".webp",
                     "2026-10-24T00:00:00Z",
                 ],
             )

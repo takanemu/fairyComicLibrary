@@ -161,7 +161,7 @@ pub async fn import_archive(
         }
     };
 
-    let thumbnail_relative_path = format!("thumbnails/{}/{}.avif", &archive_id[..2], archive_id);
+    let thumbnail_relative_path = format!("thumbnails/{}/{}.webp", &archive_id[..2], archive_id);
     let thumbnail_destination = repository_root.join(&thumbnail_relative_path);
     let thumbnail_staging_directory = repository_root.join("thumbnails/.staging");
     if let Err(error) = fs::create_dir_all(&thumbnail_staging_directory).await {
@@ -174,7 +174,7 @@ pub async fn import_archive(
         ));
     }
     let thumbnail_staging_path =
-        thumbnail_staging_directory.join(format!("{}.avif.part", next_staging_name()));
+        thumbnail_staging_directory.join(format!("{}.webp.part", next_staging_name()));
     let thumbnail_archive_path = destination.clone();
     let thumbnail_output_path = thumbnail_staging_path.clone();
     let thumbnail_format = extension.clone();
@@ -722,10 +722,10 @@ mod tests {
             .expect("read thumbnail path");
         assert_eq!(
             thumbnail_path,
-            format!("thumbnails/{}/{archive_id}.avif", &archive_id[..2])
+            format!("thumbnails/{}/{archive_id}.webp", &archive_id[..2])
         );
         crate::thumbnails::validate_existing_thumbnail(&repository.path().join(thumbnail_path))
-            .expect("validate registered AVIF thumbnail");
+            .expect("validate registered WebP thumbnail");
     }
 
     #[tokio::test]

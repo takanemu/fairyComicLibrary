@@ -70,6 +70,9 @@ pub fn open(path: &Path) -> Result<RepositoryStatus, String> {
 
     let database_path = root.join("database/library.sqlite3");
     let archive_count = database::initialize(&database_path)?;
+    if let Err(error) = crate::thumbnails::migrate_avif_thumbnails(&root) {
+        eprintln!("旧サムネイルの移行を完了できませんでした: {error}");
+    }
 
     Ok(RepositoryStatus {
         path: root.to_string_lossy().into_owned(),

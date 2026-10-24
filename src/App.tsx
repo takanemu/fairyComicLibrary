@@ -1,12 +1,21 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { LibraryView } from "./components/library/LibraryView";
+import {
+  ArchiveQuery,
+  TagWithCount,
+  listTags,
+  tagCategories,
+} from "./lib/library";
 
-const navigation = [
-  { label: "すべての作品", icon: "▦", selected: true },
-  { label: "お気に入り", icon: "♡", selected: false },
-  { label: "最近追加", icon: "◷", selected: false },
+type LibraryViewId = "all" | "favorites" | "recent";
+
+const navigation: { id: LibraryViewId; label: string; icon: string }[] = [
+  { id: "all", label: "すべての作品", icon: "▦" },
+  { id: "favorites", label: "お気に入り", icon: "♡" },
+  { id: "recent", label: "最近追加", icon: "◷" },
 ];
 
 type RepositoryStatus = {
@@ -38,6 +47,12 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [importMessages, setImportMessages] = useState<string[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [view, setView] = useState<LibraryViewId>("all");
+  const [searchText, setSearchText] = useState("");
+  const [search, setSearch] = useState("");
+  const [tagId, setTagId] = useState<number | null>(null);
+  const [tags, setTags] = useState<TagWithCount[]>([]);
+  const [version, setVersion] = useState(0);
   const importingRef = useRef(false);
   const canImportRef = useRef(false);
 
@@ -96,6 +111,53 @@ function App() {
 
   canImportRef.current = repository !== null;
 
+  const bumpVersion = useCallback(() => setVersion((current) => current + 1), []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSearch(searchText), 250);
+    return () => window.clearTimeout(timer);
+  }, [searchText]);
+
+  const hasRepository = repository !== null;
+  useEffect(() => {
+    if (!hasRepository) {
+      setTags([]);
+      return;
+    }
+    let cancelled = false;
+    listTags()
+      .then((result) => {
+        if (cancelled) {
+          return;
+        }
+        setTags(result);
+        setTagId((current) =>
+          current !== null && !result.some((tag) => tag.id === current)
+            ? null
+            : current,
+        );
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) {
+          setError(`タグ一覧を読み込めませんでした: ${String(reason)}`);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hasRepository, version]);
+
+  const query = useMemo<ArchiveQuery>(
+    () => ({
+      search: search.trim() || null,
+      favoritesOnly: view === "favorites",
+      tagId,
+      sort: view === "recent" ? "recent" : "name",
+    }),
+    [search, view, tagId],
+  );
+  const isFiltered = query.search !== null || tagId !== null || view === "favorites";
+
   const importPaths = useCallback(async (paths: string[]) => {
     if (importingRef.current || paths.length === 0) {
       return;
@@ -138,6 +200,7 @@ function App() {
             ? { ...current, archiveCount: current.archiveCount + importedCount }
             : current,
         );
+        setVersion((current) => current + 1);
       }
     } finally {
       importingRef.current = false;
@@ -222,7 +285,7 @@ function App() {
           </p>
         </div>
       )}
-      <aside className="flex w-64 shrink-0 flex-col border-r border-white/5 bg-sidebar px-5 py-6">
+      <aside className="sticky top-0 flex h-screen w-64 shrink-0 flex-col border-r border-white/5 bg-sidebar px-5 py-6">
         <div className="mb-12 flex items-center gap-3 px-2">
           <div className="grid size-9 place-items-center rounded-xl bg-violet-500/15 text-lg text-violet-300">
             ✦
@@ -239,13 +302,14 @@ function App() {
         <nav aria-label="メインナビゲーション" className="space-y-1">
           {navigation.map((item) => (
             <button
-              aria-current={item.selected ? "page" : undefined}
+              aria-current={item.id === view ? "page" : undefined}
               className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition ${
-                item.selected
+                item.id === view
                   ? "bg-white/[0.08] text-white"
                   : "text-slate-400 hover:bg-white/[0.04] hover:text-slate-200"
               }`}
-              key={item.label}
+              key={item.id}
+              onClick={() => setView(item.id)}
               type="button"
             >
               <span aria-hidden="true" className="w-5 text-center text-base">
@@ -256,7 +320,41 @@ function App() {
           ))}
         </nav>
 
-        <div className="mt-auto rounded-xl border border-white/[0.06] bg-white/[0.025] p-4">
+        {tags.length > 0 && (
+          <div className="mt-6 min-h-0 flex-1 overflow-y-auto pr-1">
+            {tagCategories.map((category) => {
+              const items = tags.filter((tag) => tag.category === category.value);
+              if (items.length === 0) {
+                return null;
+              }
+              return (
+                <div className="mb-4" key={category.value}>
+                  <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                    {category.label}
+                  </p>
+                  {items.map((tag) => (
+                    <button
+                      aria-pressed={tag.id === tagId}
+                      className={`flex w-full items-center justify-between gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition ${
+                        tag.id === tagId
+                          ? "bg-violet-400/15 text-violet-100"
+                          : "text-slate-400 hover:bg-white/[0.04] hover:text-slate-200"
+                      }`}
+                      key={tag.id}
+                      onClick={() => setTagId(tag.id === tagId ? null : tag.id)}
+                      type="button"
+                    >
+                      <span className="truncate">{tag.name}</span>
+                      <span className="text-[10px] text-slate-600">{tag.archiveCount}</span>
+                    </button>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="mt-auto shrink-0 rounded-xl border border-white/[0.06] bg-white/[0.025] p-4">
           <p className="text-xs font-medium text-slate-300">アプリ管理リポジトリ</p>
           {isLoading ? (
             <p className="mt-2 text-xs text-slate-500">状態を確認しています…</p>
@@ -289,11 +387,13 @@ function App() {
         <header className="flex h-[76px] items-center justify-between border-b border-white/5 px-10">
           <div>
             <p className="text-xs text-slate-500">マイコレクション</p>
-            <h1 className="mt-1 text-lg font-semibold tracking-tight">すべての作品</h1>
+            <h1 className="mt-1 text-lg font-semibold tracking-tight">
+              {navigation.find((item) => item.id === view)?.label}
+            </h1>
           </div>
           <div className="flex items-center gap-3">
             <span className="rounded-full border border-violet-300/15 bg-violet-300/[0.07] px-3 py-1.5 text-[11px] font-medium text-violet-200">
-              開発フェーズ 4
+              開発フェーズ 5
             </span>
             <div
               aria-label="ユーザー"
@@ -312,32 +412,22 @@ function App() {
                 アーカイブをまとめて、見つけやすく整理できます。
               </p>
             </div>
-            <div className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.025] px-3 py-2 text-xs text-slate-500">
-              <span aria-hidden="true">⌕</span>
-              <span>検索機能は今後追加</span>
-            </div>
+            {repository && (
+              <label className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.025] px-3 py-2 text-xs text-slate-300">
+                <span aria-hidden="true" className="text-slate-500">
+                  ⌕
+                </span>
+                <input
+                  aria-label="ファイル名・タグで検索"
+                  className="w-56 bg-transparent outline-none placeholder:text-slate-600"
+                  onChange={(event) => setSearchText(event.target.value)}
+                  placeholder="ファイル名・タグで検索"
+                  type="search"
+                  value={searchText}
+                />
+              </label>
+            )}
           </div>
-
-          {repository && (
-            <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3">
-              <div>
-                <p className="text-sm font-medium text-slate-200">
-                  アーカイブをライブラリへ取り込む
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  SHA-256で重複を確認し、元のファイル名を保ってリポジトリへ移動します。
-                </p>
-              </div>
-              <button
-                className="rounded-lg bg-violet-400/15 px-4 py-2.5 text-xs font-medium text-violet-200 transition hover:bg-violet-400/20 disabled:cursor-wait disabled:opacity-50"
-                disabled={isImporting}
-                onClick={importArchives}
-                type="button"
-              >
-                {isImporting ? "インポート中…" : "アーカイブを選択"}
-              </button>
-            </div>
-          )}
 
           {error && (
             <div
@@ -361,45 +451,51 @@ function App() {
             </div>
           )}
 
-          <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-white/[0.09] bg-white/[0.012] px-6 py-16 text-center">
-            <div className="mb-6 grid size-[68px] place-items-center rounded-2xl border border-violet-300/10 bg-violet-300/[0.06] text-3xl text-violet-200/80">
-              ◫
+          {repository ? (
+            <LibraryView
+              isFiltered={isFiltered}
+              onError={setError}
+              onMutated={bumpVersion}
+              query={query}
+              version={version}
+            />
+          ) : (
+            <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-white/[0.09] bg-white/[0.012] px-6 py-16 text-center">
+              <div className="mb-6 grid size-[68px] place-items-center rounded-2xl border border-violet-300/10 bg-violet-300/[0.06] text-3xl text-violet-200/80">
+                ◫
+              </div>
+              <h3 className="text-base font-medium text-slate-200">
+                リポジトリを設定してください
+              </h3>
+              <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">
+                空のディレクトリを選ぶと、アーカイブ・サムネイル・SQLiteデータベース用の構成を作成します。フォルダーは事前に作成してください。
+              </p>
+              <button
+                className="mt-7 rounded-lg bg-violet-400/15 px-4 py-2.5 text-xs font-medium text-violet-200 transition hover:bg-violet-400/20 disabled:cursor-wait disabled:opacity-50"
+                disabled={isSelecting || isLoading}
+                onClick={selectRepository}
+                type="button"
+              >
+                {isSelecting ? "準備中…" : "リポジトリを選択"}
+              </button>
             </div>
-            {repository ? (
-              <>
-                <h3 className="text-base font-medium text-slate-200">
-                  {repository.archiveCount === 0
-                    ? "コレクションはまだ空です"
-                    : `${repository.archiveCount} 件のアーカイブを登録しました`}
-                </h3>
-                <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">
-                  「アーカイブを選択」またはウィンドウへのドラッグ＆ドロップで作品を追加できます。作品の一覧表示は次の開発フェーズで実装します。
-                </p>
-                <span className="mt-7 rounded-lg border border-white/[0.07] px-4 py-2 text-xs text-slate-500">
-                  DBスキーマ v{repository.schemaVersion} · {repository.archiveCount} 作品
-                </span>
-              </>
-            ) : (
-              <>
-                <h3 className="text-base font-medium text-slate-200">
-                  リポジトリを設定してください
-                </h3>
-                <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">
-                  空のディレクトリを選ぶと、アーカイブ・サムネイル・SQLiteデータベース用の構成を作成します。フォルダーは事前に作成してください。
-                </p>
-                <button
-                  className="mt-7 rounded-lg bg-violet-400/15 px-4 py-2.5 text-xs font-medium text-violet-200 transition hover:bg-violet-400/20 disabled:cursor-wait disabled:opacity-50"
-                  disabled={isSelecting || isLoading}
-                  onClick={selectRepository}
-                  type="button"
-                >
-                  {isSelecting ? "準備中…" : "リポジトリを選択"}
-                </button>
-              </>
-            )}
-          </div>
+          )}
         </section>
       </main>
+      {repository && (
+        <button
+          aria-label={isImporting ? "インポート中" : "アーカイブをインポート"}
+          className="fixed bottom-6 right-6 z-50 grid size-14 place-items-center rounded-full bg-violet-500 text-3xl leading-none text-white shadow-lg shadow-black/40 transition hover:bg-violet-400 disabled:cursor-wait disabled:opacity-60"
+          disabled={isImporting}
+          onClick={importArchives}
+          title={isImporting ? "インポート中…" : "アーカイブをインポート（ウィンドウへのドロップも可）"}
+          type="button"
+        >
+          <span aria-hidden="true" className={isImporting ? "animate-pulse text-xl" : ""}>
+            {isImporting ? "…" : "+"}
+          </span>
+        </button>
+      )}
     </div>
   );
 }

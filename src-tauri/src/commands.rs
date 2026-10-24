@@ -1,4 +1,4 @@
-use crate::{repository, AppState};
+use crate::{library, repository, AppState};
 use std::path::PathBuf;
 use tauri::{AppHandle, State};
 
@@ -54,4 +54,56 @@ pub async fn import_archive(
 
     let _import_guard = state.import_lock.lock().await;
     crate::importing::import_archive(&repository_path, &PathBuf::from(path)).await
+}
+
+fn current_repository(state: &State<'_, AppState>) -> Result<PathBuf, String> {
+    state
+        .repository_path
+        .lock()
+        .map_err(|_| {
+            "リポジトリ状態を読み取れませんでした。アプリを再起動してください。".to_string()
+        })?
+        .clone()
+        .ok_or_else(|| "先にアプリ管理リポジトリを選択してください。".to_string())
+}
+
+#[tauri::command(async)]
+pub fn list_archives(
+    query: library::ArchiveQuery,
+    state: State<'_, AppState>,
+) -> Result<Vec<library::ArchiveSummary>, String> {
+    library::list_archives(&current_repository(&state)?, &query)
+}
+
+#[tauri::command(async)]
+pub fn list_tags(state: State<'_, AppState>) -> Result<Vec<library::TagWithCount>, String> {
+    library::list_tags(&current_repository(&state)?)
+}
+
+#[tauri::command(async)]
+pub fn set_favorite(
+    archive_id: String,
+    is_favorite: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    library::set_favorite(&current_repository(&state)?, &archive_id, is_favorite)
+}
+
+#[tauri::command(async)]
+pub fn add_tag(
+    archive_id: String,
+    category: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<library::TagSummary, String> {
+    library::add_tag(&current_repository(&state)?, &archive_id, &category, &name)
+}
+
+#[tauri::command(async)]
+pub fn remove_tag(
+    archive_id: String,
+    tag_id: i64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    library::remove_tag(&current_repository(&state)?, &archive_id, tag_id)
 }

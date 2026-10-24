@@ -1,4 +1,4 @@
-use image::{codecs::avif::AvifEncoder, imageops::FilterType, ImageEncoder, ImageReader, Limits};
+use image::{imageops::FilterType, ImageReader, Limits};
 use std::{
     fs::File,
     io::{Cursor, Read, Write},
@@ -14,6 +14,7 @@ const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_THUMBNAIL_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const THUMBNAIL_MAX_WIDTH: u32 = 400;
 const THUMBNAIL_MAX_HEIGHT: u32 = 600;
+const THUMBNAIL_QUALITY: f32 = 80.0;
 
 pub fn create_thumbnail(
     archive_path: &Path,
@@ -45,24 +46,15 @@ pub fn create_thumbnail(
     );
     let thumbnail = thumbnail.to_rgba8();
 
-    let file = File::create(output_path)
+    let encoded =
+        webp::Encoder::from_rgba(thumbnail.as_raw(), thumbnail.width(), thumbnail.height())
+            .encode(THUMBNAIL_QUALITY);
+    let mut file = File::create(output_path)
         .map_err(|error| format!("サムネイルの一時ファイルを作成できませんでした: {error}"))?;
-    let mut writer = std::io::BufWriter::new(file);
-    AvifEncoder::new_with_speed_quality(&mut writer, 8, 75)
-        .write_image(
-            thumbnail.as_raw(),
-            thumbnail.width(),
-            thumbnail.height(),
-            image::ExtendedColorType::Rgba8,
-        )
-        .map_err(|error| format!("AVIFサムネイルをエンコードできませんでした: {error}"))?;
-    writer
-        .flush()
-        .map_err(|error| format!("AVIFサムネイルを書き込めませんでした: {error}"))?;
-    writer
-        .get_ref()
-        .sync_all()
-        .map_err(|error| format!("AVIFサムネイルをディスクへ保存できませんでした: {error}"))
+    file.write_all(&encoded)
+        .map_err(|error| format!("WebPサムネイルを書き込めませんでした: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("WebPサムネイルをディスクへ保存できませんでした: {error}"))
 }
 
 fn extract_zip_cover(archive_path: &Path) -> Result<Vec<u8>, String> {
@@ -273,6 +265,66 @@ fn cover_priority(name: &str) -> u8 {
     }
 }
 
+// 旧仕様（AVIF）で保存したサムネイルを、アーカイブからWebPへ作り直す。失敗したものは次回起動時に再試行する。
+pub fn migrate_avif_thumbnails(repository_root: &Path) -> Result<u64, String> {
+    let connection = rusqlite::Connection::open(repository_root.join("database/library.sqlite3"))
+        .map_err(|error| format!("SQLiteデータベースを開けませんでした: {error}"))?;
+    let legacy: Vec<(String, String, String, String)> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT archive_id, relative_path, format, thumbnail_relative_path
+                 FROM archives WHERE thumbnail_relative_path LIKE '%.avif'",
+            )
+            .map_err(|error| format!("旧サムネイルを検索できませんでした: {error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|error| format!("旧サムネイルを読み取れませんでした: {error}"))?;
+        rows
+    };
+    if legacy.is_empty() {
+        return Ok(0);
+    }
+
+    let staging_directory = repository_root.join("thumbnails/.staging");
+    std::fs::create_dir_all(&staging_directory)
+        .map_err(|error| format!("サムネイル用一時ディレクトリを作成できませんでした: {error}"))?;
+    let mut migrated = 0;
+    for (archive_id, archive_path, format, old_path) in legacy {
+        let relative = format!("thumbnails/{}/{archive_id}.webp", &archive_id[..2]);
+        let destination = repository_root.join(&relative);
+        let staging = staging_directory.join(format!("migrate-{archive_id}.webp.part"));
+        let result = create_thumbnail(&repository_root.join(&archive_path), &format, &staging)
+            .and_then(|()| {
+                std::fs::create_dir_all(destination.parent().ok_or("保存先が不正です")?)
+                    .and_then(|()| std::fs::rename(&staging, &destination))
+                    .map_err(|error| format!("サムネイルを配置できませんでした: {error}"))
+            })
+            .and_then(|()| {
+                connection
+                    .execute(
+                        "UPDATE archives SET thumbnail_relative_path = ?1 WHERE archive_id = ?2",
+                        [&relative, &archive_id],
+                    )
+                    .map(|_| ())
+                    .map_err(|error| format!("サムネイルのパスを更新できませんでした: {error}"))
+            });
+        match result {
+            Ok(()) => {
+                let _ = std::fs::remove_file(repository_root.join(old_path));
+                migrated += 1;
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&staging);
+                eprintln!("AVIFサムネイルをWebPへ移行できませんでした ({archive_id}): {error}");
+            }
+        }
+    }
+    Ok(migrated)
+}
+
 pub fn validate_existing_thumbnail(path: &Path) -> Result<(), String> {
     let metadata = std::fs::metadata(path)
         .map_err(|error| format!("保存済みサムネイルの情報を取得できませんでした: {error}"))?;
@@ -283,8 +335,8 @@ pub fn validate_existing_thumbnail(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("保存済みサムネイルを開けませんでした: {error}"))?
         .with_guessed_format()
         .map_err(|error| format!("保存済みサムネイルの形式を判定できませんでした: {error}"))?;
-    if reader.format() != Some(image::ImageFormat::Avif) {
-        return Err("保存済みサムネイルがAVIF形式ではありません。".to_string());
+    if reader.format() != Some(image::ImageFormat::WebP) {
+        return Err("保存済みサムネイルがWebP形式ではありません。".to_string());
     }
     let mut limits = Limits::default();
     limits.max_image_width = Some(THUMBNAIL_MAX_WIDTH);
@@ -303,8 +355,8 @@ pub fn validate_existing_thumbnail(path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cover_priority, create_thumbnail, validate_existing_thumbnail, THUMBNAIL_MAX_HEIGHT,
-        THUMBNAIL_MAX_WIDTH,
+        cover_priority, create_thumbnail, migrate_avif_thumbnails, validate_existing_thumbnail,
+        THUMBNAIL_MAX_HEIGHT, THUMBNAIL_MAX_WIDTH,
     };
     use image::{ImageEncoder, RgbImage};
     use std::{
@@ -340,10 +392,10 @@ mod tests {
     }
 
     #[test]
-    fn writes_a_resized_avif_cover_from_cbz() {
+    fn writes_a_resized_webp_cover_from_cbz() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let archive_path = directory.path().join("comic.cbz");
-        let output_path = directory.path().join("cover.avif");
+        let output_path = directory.path().join("cover.webp");
         write_zip(
             &archive_path,
             &[
@@ -353,10 +405,56 @@ mod tests {
         );
 
         create_thumbnail(&archive_path, "cbz", &output_path).expect("create thumbnail");
-        validate_existing_thumbnail(&output_path).expect("validate AVIF thumbnail");
-        let image = image::open(output_path).expect("decode AVIF");
+        validate_existing_thumbnail(&output_path).expect("validate WebP thumbnail");
+        let image = image::open(output_path).expect("decode WebP");
         assert_eq!(image.width(), THUMBNAIL_MAX_WIDTH);
         assert!(image.height() <= THUMBNAIL_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn migrates_legacy_avif_records_to_webp() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        std::fs::create_dir_all(repository.path().join("database")).expect("database dir");
+        let database_path = repository.path().join("database/library.sqlite3");
+        crate::database::initialize(&database_path).expect("initialize database");
+        let id = "cd".repeat(32);
+        let archive_relative = "archives/cd/Legacy.cbz";
+        let archive_path = repository.path().join(archive_relative);
+        std::fs::create_dir_all(archive_path.parent().expect("parent")).expect("archive dir");
+        write_zip(&archive_path, &[("cover.png", &png_bytes(300, 450))]);
+        let old_relative = format!("thumbnails/cd/{id}.avif");
+        std::fs::create_dir_all(repository.path().join("thumbnails/cd")).expect("thumbnail dir");
+        std::fs::write(repository.path().join(&old_relative), b"legacy").expect("old avif");
+        let connection = rusqlite::Connection::open(&database_path).expect("open database");
+        connection
+            .execute(
+                "INSERT INTO archives (archive_id, original_filename, relative_path, format,
+                    file_size, thumbnail_relative_path, imported_at)
+                 VALUES (?1, 'Legacy.cbz', ?2, 'cbz', 1, ?3, '2026-01-01T00:00:00Z')",
+                rusqlite::params![id, archive_relative, old_relative],
+            )
+            .expect("insert legacy archive");
+
+        assert_eq!(
+            migrate_avif_thumbnails(repository.path()).expect("migrate"),
+            1
+        );
+        assert_eq!(
+            migrate_avif_thumbnails(repository.path()).expect("rerun"),
+            0
+        );
+
+        let new_relative = format!("thumbnails/cd/{id}.webp");
+        let stored: String = connection
+            .query_row(
+                "SELECT thumbnail_relative_path FROM archives WHERE archive_id = ?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .expect("read path");
+        assert_eq!(stored, new_relative);
+        validate_existing_thumbnail(&repository.path().join(new_relative)).expect("valid WebP");
+        assert!(!repository.path().join(old_relative).exists());
     }
 
     #[test]
