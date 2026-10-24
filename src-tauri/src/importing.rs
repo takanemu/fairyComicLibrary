@@ -82,15 +82,12 @@ pub async fn import_archive(
             return Err(error);
         }
     };
-    match existing_archive {
-        Some(relative_path) => {
-            remove_if_exists(&staging_path).await;
-            return Ok(ImportOutcome::Duplicate {
-                archive_id,
-                relative_path,
-            });
-        }
-        None => {}
+    if let Some(relative_path) = existing_archive {
+        remove_if_exists(&staging_path).await;
+        return Ok(ImportOutcome::Duplicate {
+            archive_id,
+            relative_path,
+        });
     }
 
     let relative_path = format!("archives/{}/{}", &archive_id[..2], filename);

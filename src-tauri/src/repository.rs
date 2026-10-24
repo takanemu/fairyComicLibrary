@@ -19,6 +19,7 @@ pub struct RepositoryStatus {
     pub path: String,
     pub schema_version: u32,
     pub archive_count: u64,
+    pub warnings: Vec<String>,
 }
 
 pub fn open(path: &Path) -> Result<RepositoryStatus, String> {
@@ -74,10 +75,13 @@ pub fn open(path: &Path) -> Result<RepositoryStatus, String> {
         eprintln!("旧サムネイルの移行を完了できませんでした: {error}");
     }
 
+    let warnings = crate::maintenance::verify(&root)?.warnings;
+
     Ok(RepositoryStatus {
         path: root.to_string_lossy().into_owned(),
         schema_version: CURRENT_SCHEMA_VERSION,
         archive_count,
+        warnings,
     })
 }
 

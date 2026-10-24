@@ -1,3 +1,4 @@
+import { CoverPicker } from "./CoverPicker";
 import { FormEvent, useEffect, useState } from "react";
 import {
   ArchiveSummary,
@@ -13,6 +14,7 @@ type Props = {
   onToggleFavorite: () => void;
   onAddTag: (category: TagCategory, name: string) => Promise<void>;
   onRemoveTag: (tagId: number) => Promise<void>;
+  onRegenerateCover: (entryName: string | null) => Promise<void>;
 };
 
 export function ArchiveDetail({
@@ -21,20 +23,34 @@ export function ArchiveDetail({
   onToggleFavorite,
   onAddTag,
   onRemoveTag,
+  onRegenerateCover,
 }: Props) {
+  const [coverBusy, setCoverBusy] = useState(false);
+  const [picking, setPicking] = useState(false);
+
+  async function regenerate(entryName: string | null) {
+    setPicking(false);
+    setCoverBusy(true);
+    try {
+      await onRegenerateCover(entryName);
+    } finally {
+      setCoverBusy(false);
+    }
+  }
+
   const [category, setCategory] = useState<TagCategory>("author");
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (event.key === "Escape" && !picking) {
         onClose();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  }, [onClose, picking]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -105,6 +121,34 @@ export function ArchiveDetail({
       >
         {archive.isFavorite ? "♥ お気に入り済み" : "♡ お気に入りに追加"}
       </button>
+
+      <div className="mt-2 flex gap-2">
+        <button
+          className="flex-1 rounded-lg border border-white/[0.08] px-2 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:opacity-50"
+          disabled={coverBusy}
+          onClick={() => void regenerate(null)}
+          title="自動抽出の規則で表紙を作り直します"
+          type="button"
+        >
+          {coverBusy ? "作成中…" : "表紙を再作成"}
+        </button>
+        <button
+          className="flex-1 rounded-lg border border-white/[0.08] px-2 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:opacity-50"
+          disabled={coverBusy}
+          onClick={() => setPicking(true)}
+          title="アーカイブ内の画像から表紙を手動で選びます"
+          type="button"
+        >
+          表紙を選ぶ
+        </button>
+      </div>
+      {picking && (
+        <CoverPicker
+          archiveId={archive.archiveId}
+          onClose={() => setPicking(false)}
+          onSelect={(entryName) => void regenerate(entryName)}
+        />
+      )}
 
       <h3 className="mb-2 mt-6 text-xs font-semibold text-slate-400">タグ</h3>
       {archive.tags.length === 0 ? (

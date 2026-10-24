@@ -27,7 +27,20 @@ pub fn create_thumbnail(
         "rar" | "cbr" => extract_rar_cover(archive_path)?,
         _ => return Err(format!("サムネイルを作成できない形式です: {format}")),
     };
+    write_thumbnail(image_bytes, output_path)
+}
 
+// 自動抽出の規則に合わない作品向けに、利用者が選んだエントリーから作る。
+pub fn create_thumbnail_from_entry(
+    archive_path: &Path,
+    format: &str,
+    entry_name: &str,
+    output_path: &Path,
+) -> Result<(), String> {
+    write_thumbnail(read_entry(archive_path, format, entry_name)?, output_path)
+}
+
+fn decode_limited(image_bytes: Vec<u8>) -> Result<image::DynamicImage, String> {
     let mut reader = ImageReader::new(Cursor::new(image_bytes))
         .with_guessed_format()
         .map_err(|error| format!("表紙画像の形式を判定できませんでした: {error}"))?;
@@ -36,25 +49,205 @@ pub fn create_thumbnail(
     limits.max_image_height = Some(MAX_IMAGE_HEIGHT);
     limits.max_alloc = Some(MAX_DECODE_BYTES);
     reader.limits(limits);
-    let image = reader
+    reader
         .decode()
-        .map_err(|error| format!("表紙画像をデコードできませんでした: {error}"))?;
-    let thumbnail = image.resize(
+        .map_err(|error| format!("表紙画像をデコードできませんでした: {error}"))
+}
+
+fn encode_webp(
+    image_bytes: Vec<u8>,
+    max_width: u32,
+    max_height: u32,
+    quality: f32,
+) -> Result<Vec<u8>, String> {
+    let image = decode_limited(image_bytes)?;
+    let resized = image
+        .resize(max_width, max_height, FilterType::Lanczos3)
+        .to_rgba8();
+    Ok(
+        webp::Encoder::from_rgba(resized.as_raw(), resized.width(), resized.height())
+            .encode(quality)
+            .to_vec(),
+    )
+}
+
+fn write_thumbnail(image_bytes: Vec<u8>, output_path: &Path) -> Result<(), String> {
+    let encoded = encode_webp(
+        image_bytes,
         THUMBNAIL_MAX_WIDTH,
         THUMBNAIL_MAX_HEIGHT,
-        FilterType::Lanczos3,
-    );
-    let thumbnail = thumbnail.to_rgba8();
-
-    let encoded =
-        webp::Encoder::from_rgba(thumbnail.as_raw(), thumbnail.width(), thumbnail.height())
-            .encode(THUMBNAIL_QUALITY);
+        THUMBNAIL_QUALITY,
+    )?;
     let mut file = File::create(output_path)
         .map_err(|error| format!("サムネイルの一時ファイルを作成できませんでした: {error}"))?;
     file.write_all(&encoded)
         .map_err(|error| format!("WebPサムネイルを書き込めませんでした: {error}"))?;
     file.sync_all()
         .map_err(|error| format!("WebPサムネイルをディスクへ保存できませんでした: {error}"))
+}
+
+fn unsupported(format: &str) -> String {
+    format!("サムネイルを作成できない形式です: {format}")
+}
+
+fn is_selectable_image(name: &str) -> bool {
+    is_supported_image(name) && !name.split(['/', '\\']).any(|part| part == "..")
+}
+
+// 表紙の選択肢として、アーカイブ内の画像エントリー名を返す（展開はしない）。
+pub fn list_images(archive_path: &Path, format: &str) -> Result<Vec<String>, String> {
+    let mut names = match format {
+        "zip" | "cbz" => {
+            let file = File::open(archive_path)
+                .map_err(|error| format!("ZIPアーカイブを開けませんでした: {error}"))?;
+            let archive = ZipArchive::new(file)
+                .map_err(|error| format!("ZIPアーカイブが不正です: {error}"))?;
+            if archive.len() > MAX_ARCHIVE_ENTRIES {
+                return Err(format!(
+                    "アーカイブのエントリー数が上限（{MAX_ARCHIVE_ENTRIES}件）を超えています。"
+                ));
+            }
+            archive
+                .file_names()
+                .filter(|name| !name.ends_with('/') && is_selectable_image(name))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        }
+        "7z" => {
+            let mut reader =
+                sevenz_rust::SevenZReader::open(archive_path, sevenz_rust::Password::empty())
+                    .map_err(|error| format!("7zアーカイブを開けませんでした: {error}"))?;
+            let mut names = Vec::new();
+            reader
+                .for_each_entries(|entry, contents| {
+                    if names.len() >= MAX_ARCHIVE_ENTRIES {
+                        return Err(sevenz_rust::Error::other(
+                            "エントリー数が上限を超えています",
+                        ));
+                    }
+                    if !entry.is_directory() && is_selectable_image(entry.name()) {
+                        names.push(entry.name().to_string());
+                    }
+                    std::io::copy(contents, &mut std::io::sink())
+                        .map_err(sevenz_rust::Error::io)?;
+                    Ok(true)
+                })
+                .map_err(|error| format!("7z内のファイルを読み込めませんでした: {error}"))?;
+            names
+        }
+        "rar" | "cbr" => {
+            let mut archive = unrar::Archive::new(archive_path)
+                .open_for_processing()
+                .map_err(|error| format!("RARアーカイブを開けませんでした: {error}"))?;
+            let mut names = Vec::new();
+            let mut count = 0_usize;
+            while let Some(entry) = archive
+                .read_header()
+                .map_err(|error| format!("RAR内のファイル一覧を読み込めませんでした: {error}"))?
+            {
+                count += 1;
+                if count > MAX_ARCHIVE_ENTRIES {
+                    return Err(format!(
+                        "アーカイブのエントリー数が上限（{MAX_ARCHIVE_ENTRIES}件）を超えています。"
+                    ));
+                }
+                let header = entry.entry();
+                let name = header.filename.to_string_lossy().into_owned();
+                if !header.is_directory() && is_selectable_image(&name) {
+                    names.push(name);
+                }
+                archive = entry
+                    .skip()
+                    .map_err(|error| format!("RAR内のファイルを読み飛ばせませんでした: {error}"))?;
+            }
+            names
+        }
+        _ => return Err(unsupported(format)),
+    };
+    names.sort_by_key(|name| name.to_lowercase());
+    Ok(names)
+}
+
+// 名前を指定してエントリー1件を読み出す。サイズ上限と画像検証は自動抽出と同じ。
+pub fn read_entry(archive_path: &Path, format: &str, entry_name: &str) -> Result<Vec<u8>, String> {
+    if !is_selectable_image(entry_name) {
+        return Err("画像として扱えないエントリーです。".to_string());
+    }
+    let bytes = match format {
+        "zip" | "cbz" => {
+            let file = File::open(archive_path)
+                .map_err(|error| format!("ZIPアーカイブを開けませんでした: {error}"))?;
+            let mut archive = ZipArchive::new(file)
+                .map_err(|error| format!("ZIPアーカイブが不正です: {error}"))?;
+            let entry = archive
+                .by_name(entry_name)
+                .map_err(|error| format!("指定した画像が見つかりません: {error}"))?;
+            if entry.size() > MAX_IMAGE_ENTRY_BYTES {
+                return Err("指定した画像が大きすぎます。".to_string());
+            }
+            let mut bytes = Vec::with_capacity(entry.size() as usize);
+            entry
+                .take(MAX_IMAGE_ENTRY_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|error| format!("ZIP内の画像を展開できませんでした: {error}"))?;
+            bytes
+        }
+        "7z" => {
+            let mut reader =
+                sevenz_rust::SevenZReader::open(archive_path, sevenz_rust::Password::empty())
+                    .map_err(|error| format!("7zアーカイブを開けませんでした: {error}"))?;
+            let mut found: Option<Vec<u8>> = None;
+            reader
+                .for_each_entries(|entry, contents| {
+                    if entry.name() == entry_name && !entry.is_directory() {
+                        let mut bytes = Vec::new();
+                        contents
+                            .take(MAX_IMAGE_ENTRY_BYTES + 1)
+                            .read_to_end(&mut bytes)
+                            .map_err(sevenz_rust::Error::io)?;
+                        found = Some(bytes);
+                        return Ok(false);
+                    }
+                    std::io::copy(contents, &mut std::io::sink())
+                        .map_err(sevenz_rust::Error::io)?;
+                    Ok(true)
+                })
+                .map_err(|error| format!("7z内のファイルを読み込めませんでした: {error}"))?;
+            found.ok_or_else(|| "指定した画像が見つかりません。".to_string())?
+        }
+        "rar" | "cbr" => {
+            let mut archive = unrar::Archive::new(archive_path)
+                .open_for_processing()
+                .map_err(|error| format!("RARアーカイブを開けませんでした: {error}"))?;
+            let mut found = None;
+            while let Some(entry) = archive
+                .read_header()
+                .map_err(|error| format!("RAR内のファイル一覧を読み込めませんでした: {error}"))?
+            {
+                let header = entry.entry();
+                if !header.is_directory()
+                    && header.filename.to_string_lossy() == entry_name
+                    && header.unpacked_size <= MAX_IMAGE_ENTRY_BYTES
+                {
+                    let (bytes, _) = entry
+                        .read()
+                        .map_err(|error| format!("RAR内の画像を展開できませんでした: {error}"))?;
+                    found = Some(bytes);
+                    break;
+                }
+                archive = entry
+                    .skip()
+                    .map_err(|error| format!("RAR内のファイルを読み飛ばせませんでした: {error}"))?;
+            }
+            found.ok_or_else(|| "指定した画像が見つからないか、大きすぎます。".to_string())?
+        }
+        _ => return Err(unsupported(format)),
+    };
+    if bytes.is_empty() || bytes.len() as u64 > MAX_IMAGE_ENTRY_BYTES {
+        return Err("指定した画像が空、または大きすぎます。".to_string());
+    }
+    validate_image(&bytes)?;
+    Ok(bytes)
 }
 
 fn extract_zip_cover(archive_path: &Path) -> Result<Vec<u8>, String> {
@@ -73,7 +266,7 @@ fn extract_zip_cover(archive_path: &Path) -> Result<Vec<u8>, String> {
         let entry = archive
             .by_index(index)
             .map_err(|error| format!("ZIP内のファイル一覧を読み込めませんでした: {error}"))?;
-        if entry.is_file() && is_supported_image(&entry.name()) && entry.size() > 0 {
+        if entry.is_file() && is_supported_image(entry.name()) && entry.size() > 0 {
             candidates.push((index, cover_priority(entry.name()), entry.size()));
         }
     }
@@ -256,9 +449,11 @@ fn is_supported_image(name: &str) -> bool {
 fn cover_priority(name: &str) -> u8 {
     let name = name.to_lowercase();
     let basename = name.rsplit(['/', '\\']).next().unwrap_or(&name);
-    if basename.contains("cover") || basename.contains("jacket") || basename.contains("front") {
-        0
-    } else if basename.starts_with("表紙") {
+    if basename.contains("cover")
+        || basename.contains("jacket")
+        || basename.contains("front")
+        || basename.starts_with("表紙")
+    {
         0
     } else {
         1
@@ -389,6 +584,35 @@ mod tests {
             writer.write_all(bytes).expect("write zip entry");
         }
         writer.finish().expect("finish zip");
+    }
+
+    #[test]
+    fn lists_and_reads_selected_cover_entries() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let archive_path = directory.path().join("comic.cbz");
+        write_zip(
+            &archive_path,
+            &[
+                ("b/002.png", &png_bytes(10, 20)),
+                ("a/001.PNG", &png_bytes(30, 40)),
+                ("notes.txt", b"text"),
+                ("../evil.png", &png_bytes(5, 5)),
+            ],
+        );
+
+        assert_eq!(
+            super::list_images(&archive_path, "cbz").expect("list"),
+            ["a/001.PNG", "b/002.png"]
+        );
+        assert!(super::read_entry(&archive_path, "cbz", "a/001.PNG").is_ok());
+        assert!(super::read_entry(&archive_path, "cbz", "notes.txt").is_err());
+        assert!(super::read_entry(&archive_path, "cbz", "../evil.png").is_err());
+        assert!(super::read_entry(&archive_path, "cbz", "missing.png").is_err());
+
+        let output = directory.path().join("picked.webp");
+        super::create_thumbnail_from_entry(&archive_path, "cbz", "b/002.png", &output)
+            .expect("thumbnail from entry");
+        assert!(output.metadata().expect("output").len() > 0);
     }
 
     #[test]

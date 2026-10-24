@@ -6,6 +6,7 @@ import {
   addTag,
   listArchives,
   removeTag,
+  regenerateThumbnail,
   setFavorite,
 } from "../../lib/library";
 import { ArchiveCard } from "./ArchiveCard";
@@ -125,6 +126,12 @@ export function LibraryView({
             mutate(
               () => removeTag(selected.archiveId, tagId),
               "タグを外せませんでした",
+            )
+          }
+          onRegenerateCover={(entryName) =>
+            mutate(
+              () => regenerateThumbnail(selected.archiveId, entryName),
+              "表紙を作り直せませんでした",
             )
           }
           onToggleFavorite={() => void toggleFavorite(selected)}

@@ -107,3 +107,63 @@ pub fn remove_tag(
 ) -> Result<(), String> {
     library::remove_tag(&current_repository(&state)?, &archive_id, tag_id)
 }
+
+#[tauri::command]
+pub async fn backup_repository(
+    destination: String,
+    state: State<'_, AppState>,
+) -> Result<crate::maintenance::BackupSummary, String> {
+    let repository_path = current_repository(&state)?;
+    // インポートと同時に走らせると、ファイルとDBの対応が崩れた状態でコピーしかねない。
+    let _import_guard = state.import_lock.lock().await;
+    tokio::task::spawn_blocking(move || {
+        crate::maintenance::backup(&repository_path, &PathBuf::from(destination))
+    })
+    .await
+    .map_err(|error| format!("バックアップ処理に失敗しました: {error}"))?
+}
+
+async fn with_exclusive_repository<T: Send + 'static>(
+    state: &State<'_, AppState>,
+    work: impl FnOnce(PathBuf) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let repository_path = current_repository(state)?;
+    // インポート・バックアップと同時にサムネイルを差し替えないよう直列化する。
+    let _guard = state.import_lock.lock().await;
+    tokio::task::spawn_blocking(move || work(repository_path))
+        .await
+        .map_err(|error| format!("処理に失敗しました: {error}"))?
+}
+
+#[tauri::command]
+pub async fn regenerate_thumbnail(
+    archive_id: String,
+    entry_name: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    with_exclusive_repository(&state, move |root| {
+        crate::maintenance::regenerate_thumbnail(&root, &archive_id, entry_name.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn regenerate_missing_thumbnails(
+    state: State<'_, AppState>,
+) -> Result<crate::maintenance::RegenerateSummary, String> {
+    with_exclusive_repository(&state, |root| {
+        crate::maintenance::regenerate_missing_thumbnails(&root)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn list_cover_candidates(
+    archive_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    with_exclusive_repository(&state, move |root| {
+        crate::maintenance::list_cover_candidates(&root, &archive_id)
+    })
+    .await
+}

@@ -43,8 +43,41 @@ export const addTag = (archiveId: string, category: TagCategory, name: string) =
 export const removeTag = (archiveId: string, tagId: number) =>
   invoke<void>("remove_tag", { archiveId, tagId });
 
-export const thumbnailUrl = (archiveId: string) =>
-  convertFileSrc(archiveId, "thumbnail");
+// サムネイルは長期キャッシュされるため、再作成したIDにはクエリで版を付けて取り直させる。
+const thumbnailRevisions = new Map<string, number>();
+let thumbnailEpoch = 0;
+
+export const thumbnailUrl = (archiveId: string) => {
+  const revision = Math.max(thumbnailRevisions.get(archiveId) ?? 0, thumbnailEpoch);
+  const url = convertFileSrc(archiveId, "thumbnail");
+  return revision ? `${url}?v=${revision}` : url;
+};
+
+export const regenerateThumbnail = async (
+  archiveId: string,
+  entryName: string | null = null,
+) => {
+  await invoke<void>("regenerate_thumbnail", { archiveId, entryName });
+  thumbnailRevisions.set(archiveId, Date.now());
+};
+
+export type RegenerateSummary = {
+  regenerated: number;
+  failed: number;
+  firstFailure: string | null;
+};
+
+// まとめて再作成した場合はどのIDが変わったか分からないため、全サムネイルのURLを更新する。
+export const regenerateMissingThumbnails = async () => {
+  try {
+    return await invoke<RegenerateSummary>("regenerate_missing_thumbnails");
+  } finally {
+    thumbnailEpoch = Date.now();
+  }
+};
+
+export const listCoverCandidates = (archiveId: string) =>
+  invoke<string[]>("list_cover_candidates", { archiveId });
 
 export function formatFileSize(bytes: number): string {
   const units = ["B", "KB", "MB", "GB", "TB"];

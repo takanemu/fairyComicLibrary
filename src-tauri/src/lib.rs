@@ -2,6 +2,7 @@ mod commands;
 mod database;
 mod importing;
 mod library;
+mod maintenance;
 mod repository;
 mod thumbnails;
 
@@ -43,7 +44,11 @@ pub fn run() {
             commands::list_tags,
             commands::set_favorite,
             commands::add_tag,
-            commands::remove_tag
+            commands::remove_tag,
+            commands::backup_repository,
+            commands::regenerate_thumbnail,
+            commands::regenerate_missing_thumbnails,
+            commands::list_cover_candidates,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Fairy Comic Library");
@@ -54,10 +59,16 @@ fn thumbnail_response(
     uri_path: &str,
 ) -> http::Response<Cow<'static, [u8]>> {
     let respond = |status: u16, body: Vec<u8>| {
+        // 404を長期キャッシュすると、後から作成したサムネイルが表示されなくなる。
+        let cache = if status == 200 {
+            "max-age=31536000, immutable"
+        } else {
+            "no-store"
+        };
         http::Response::builder()
             .status(status)
             .header("Content-Type", "image/webp")
-            .header("Cache-Control", "max-age=31536000, immutable")
+            .header("Cache-Control", cache)
             .body(Cow::Owned(body))
             .expect("build thumbnail response")
     };

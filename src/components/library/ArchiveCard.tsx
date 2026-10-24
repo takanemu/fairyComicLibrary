@@ -9,7 +9,8 @@ type Props = {
 };
 
 export function ArchiveCard({ archive, selected, onSelect, onToggleFavorite }: Props) {
-  const [imageFailed, setImageFailed] = useState(false);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const url = thumbnailUrl(archive.archiveId);
 
   return (
     <div
@@ -26,13 +27,13 @@ export function ArchiveCard({ archive, selected, onSelect, onToggleFavorite }: P
         type="button"
       >
         <div className="grid aspect-[2/3] w-full place-items-center overflow-hidden bg-black/20">
-          {archive.hasThumbnail && !imageFailed ? (
+          {archive.hasThumbnail && failedUrl !== url ? (
             <img
               alt=""
               className="size-full object-cover"
               loading="lazy"
-              onError={() => setImageFailed(true)}
-              src={thumbnailUrl(archive.archiveId)}
+              onError={() => setFailedUrl(url)}
+              src={url}
             />
           ) : (
             <span aria-hidden="true" className="text-3xl text-slate-600">

@@ -12,6 +12,7 @@ import {
   ArchiveQuery,
   TagWithCount,
   listTags,
+  regenerateMissingThumbnails,
   tagCategories,
 } from "./lib/library";
 
@@ -27,6 +28,7 @@ type RepositoryStatus = {
   path: string;
   schemaVersion: number;
   archiveCount: number;
+  warnings: string[];
 };
 
 type ImportOutcome =
@@ -44,21 +46,8 @@ type ImportOutcome =
       relativePath: string;
     };
 
-async function notifyImportResult(
-  imported: number,
-  duplicate: number,
-  failed: number,
-  firstFailure: string | null,
-) {
+async function notify(title: string, body: string) {
   if (!("__TAURI_INTERNALS__" in window)) {
-    return;
-  }
-  const parts = [
-    imported > 0 ? `${imported}件を登録` : null,
-    duplicate > 0 ? `${duplicate}件は重複` : null,
-    failed > 0 ? `${failed}件は失敗` : null,
-  ].filter((part) => part !== null);
-  if (parts.length === 0) {
     return;
   }
   try {
@@ -67,14 +56,31 @@ async function notifyImportResult(
       granted = (await requestPermission()) === "granted";
     }
     if (granted) {
-      sendNotification({
-        title: failed > 0 ? "インポートが一部失敗しました" : "インポートが完了しました",
-        body: [parts.join("、"), firstFailure].filter(Boolean).join("\n"),
-      });
+      sendNotification({ title, body });
     }
   } catch {
-    // 通知はおまけの機能なので、失敗してもインポート結果には影響させない。
+    // 通知はおまけの機能なので、失敗しても元の処理の結果には影響させない。
   }
+}
+
+async function notifyImportResult(
+  imported: number,
+  duplicate: number,
+  failed: number,
+  firstFailure: string | null,
+) {
+  const parts = [
+    imported > 0 ? `${imported}件を登録` : null,
+    duplicate > 0 ? `${duplicate}件は重複` : null,
+    failed > 0 ? `${failed}件は失敗` : null,
+  ].filter((part) => part !== null);
+  if (parts.length === 0) {
+    return;
+  }
+  await notify(
+    failed > 0 ? "インポートが一部失敗しました" : "インポートが完了しました",
+    [parts.join("、"), firstFailure].filter(Boolean).join("\n"),
+  );
 }
 
 function App() {
@@ -82,6 +88,8 @@ function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSelecting, setIsSelecting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [isBackingUp, setIsBackingUp] = useState(false);
+  const [isRegenerating, setIsRegenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [view, setView] = useState<LibraryViewId>("all");
@@ -148,6 +156,59 @@ function App() {
   }
 
   canImportRef.current = repository !== null;
+
+  async function regenerateMissing() {
+    setError(null);
+    setIsRegenerating(true);
+    try {
+      const summary = await regenerateMissingThumbnails();
+      const status = await invoke<RepositoryStatus | null>("get_repository_status");
+      setRepository(status);
+      setVersion((current) => current + 1);
+      void notify(
+        summary.failed > 0
+          ? "サムネイルの再作成が一部失敗しました"
+          : "サムネイルを再作成しました",
+        [
+          `${summary.regenerated}件を再作成${summary.failed > 0 ? `、${summary.failed}件は失敗` : ""}`,
+          summary.firstFailure,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      );
+    } catch (reason) {
+      setError(`サムネイルを再作成できませんでした: ${String(reason)}`);
+    } finally {
+      setIsRegenerating(false);
+    }
+  }
+
+  async function backupRepository() {
+    setError(null);
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "バックアップ先（空のディレクトリ）を選択",
+      });
+      if (typeof selected !== "string") {
+        return;
+      }
+      setIsBackingUp(true);
+      const summary = await invoke<{ archiveCount: number; fileCount: number }>(
+        "backup_repository",
+        { destination: selected },
+      );
+      void notify(
+        "バックアップが完了しました",
+        `${summary.archiveCount}件のアーカイブをコピーしました`,
+      );
+    } catch (reason) {
+      setError(`バックアップできませんでした: ${String(reason)}`);
+    } finally {
+      setIsBackingUp(false);
+    }
+  }
 
   const bumpVersion = useCallback(() => setVersion((current) => current + 1), []);
 
@@ -406,6 +467,17 @@ function App() {
           >
             {isSelecting ? "処理中…" : repository ? "場所を変更" : "未登録"}
           </button>
+          {repository && (
+            <button
+              className="mt-2 w-full rounded-lg border border-white/[0.08] px-3 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:cursor-wait disabled:opacity-50"
+              disabled={isBackingUp || isImporting}
+              onClick={backupRepository}
+              title="リポジトリ全体を、別PCへ移せる形でコピーします"
+              type="button"
+            >
+              {isBackingUp ? "バックアップ中…" : "バックアップ"}
+            </button>
+          )}
         </div>
       </aside>
 
@@ -437,6 +509,30 @@ function App() {
                   value={searchText}
                 />
               </label>
+            </div>
+          )}
+
+          {repository && repository.warnings.length > 0 && (
+            <div
+              className="mb-5 space-y-1 rounded-xl border border-amber-300/25 bg-amber-300/[0.06] px-4 py-3 text-xs leading-5 text-amber-200"
+              role="alert"
+            >
+              <p className="font-medium">リポジトリの検証で問題が見つかりました</p>
+              {repository.warnings.map((warning) => (
+                <p className="break-all" key={warning}>
+                  {warning}
+                </p>
+              ))}
+              {repository.warnings.some((warning) => warning.startsWith("サムネイル")) && (
+                <button
+                  className="mt-2 rounded-lg border border-amber-300/30 px-3 py-1.5 text-xs font-medium text-amber-100 transition hover:bg-amber-300/10 disabled:opacity-50"
+                  disabled={isRegenerating}
+                  onClick={regenerateMissing}
+                  type="button"
+                >
+                  {isRegenerating ? "再作成中…" : "欠けたサムネイルを再作成"}
+                </button>
+              )}
             </div>
           )}
 
