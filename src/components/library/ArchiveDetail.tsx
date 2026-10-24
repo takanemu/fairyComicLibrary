@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import {
   ArchiveSummary,
   TagCategory,
@@ -26,6 +26,16 @@ export function ArchiveDetail({
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!name.trim()) {
@@ -43,27 +53,26 @@ export function ArchiveDetail({
   return (
     <aside
       aria-label="アーカイブの詳細"
-      className="fixed inset-y-0 right-0 z-40 flex w-80 flex-col overflow-y-auto border-l border-white/[0.07] bg-sidebar p-5 pb-28 shadow-2xl"
+      className="fixed bottom-0 right-0 top-[77px] z-40 flex w-80 flex-col overflow-y-auto border-l border-white/[0.07] bg-sidebar p-5 pb-28 shadow-2xl"
     >
-      <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-slate-200">詳細</h2>
+      <div className="relative mb-4 min-h-12">
+        {archive.hasThumbnail && (
+          <img
+            alt=""
+            className="w-full rounded-xl border border-white/[0.06] object-cover"
+            src={thumbnailUrl(archive.archiveId)}
+          />
+        )}
         <button
           aria-label="閉じる"
-          className="grid size-8 place-items-center rounded-lg text-slate-400 hover:bg-white/[0.06]"
+          className="absolute right-2 top-2 grid size-8 place-items-center rounded-full bg-black/60 text-sm text-white shadow-lg backdrop-blur transition hover:bg-black/80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300"
           onClick={onClose}
+          title="閉じる (Esc)"
           type="button"
         >
           ✕
         </button>
       </div>
-
-      {archive.hasThumbnail && (
-        <img
-          alt=""
-          className="mb-4 w-full rounded-xl border border-white/[0.06] object-cover"
-          src={thumbnailUrl(archive.archiveId)}
-        />
-      )}
       <p className="break-all text-sm font-medium leading-6 text-slate-100">
         {archive.filename}
       </p>
