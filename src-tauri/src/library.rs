@@ -49,7 +49,7 @@ pub enum SortOrder {
 pub struct ArchiveQuery {
     pub search: Option<String>,
     pub favorites_only: bool,
-    pub tag_id: Option<i64>,
+    pub tag_ids: Vec<i64>,
     pub sort: SortOrder,
 }
 
@@ -97,14 +97,29 @@ pub fn list_archives(
         SortOrder::Recent => ("a.imported_at DESC, a.archive_id ASC", RECENT_LIMIT),
     };
 
+    // 同じ分類内は OR、異なる分類の間は AND。数値のみを埋め込むためSQLインジェクションは起きない。
+    let tag_filter = if query.tag_ids.is_empty() {
+        String::new()
+    } else {
+        let ids = query
+            .tag_ids
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "AND (SELECT COUNT(DISTINCT t.category) FROM archive_tags x
+                  JOIN tags t ON t.id = x.tag_id
+                  WHERE x.archive_id = a.archive_id AND t.id IN ({ids}))
+                = (SELECT COUNT(DISTINCT category) FROM tags WHERE id IN ({ids}))"
+        )
+    };
     let sql = format!(
         "SELECT a.archive_id, a.original_filename, a.format, a.file_size,
                 a.imported_at, a.is_favorite, a.thumbnail_relative_path IS NOT NULL
          FROM archives a
          WHERE (:favorites = 0 OR a.is_favorite = 1)
-           AND (:tag_id IS NULL OR EXISTS (
-                SELECT 1 FROM archive_tags x
-                WHERE x.archive_id = a.archive_id AND x.tag_id = :tag_id))
+           {tag_filter}
            AND (:search IS NULL
                 OR a.original_filename LIKE :search ESCAPE '\\'
                 OR EXISTS (
@@ -120,7 +135,6 @@ pub fn list_archives(
         .query_map(
             named_params! {
                 ":favorites": query.favorites_only as i64,
-                ":tag_id": query.tag_id,
                 ":search": search,
                 ":limit": limit,
             },
@@ -421,7 +435,7 @@ mod tests {
         assert_eq!(tags[0].archive_count, 2);
 
         let filtered = ArchiveQuery {
-            tag_id: Some(tag.id),
+            tag_ids: vec![tag.id],
             ..Default::default()
         };
         assert_eq!(
@@ -433,6 +447,23 @@ mod tests {
         assert_eq!(list_tags(repository.path()).expect("tags").len(), 1);
         remove_tag(repository.path(), &id(1), tag.id).expect("remove from second");
         assert!(list_tags(repository.path()).expect("tags").is_empty());
+    }
+
+    #[test]
+    fn combines_tags_with_or_within_category_and_and_across_categories() {
+        let repository = repository_with_archives();
+        let root = repository.path();
+        let a1 = add_tag(root, &id(0), "author", "A1").unwrap();
+        let c1 = add_tag(root, &id(0), "classification", "C1").unwrap();
+        let a2 = add_tag(root, &id(1), "author", "A2").unwrap();
+        add_tag(root, &id(1), "classification", "C2").unwrap();
+        let query = |ids: Vec<i64>| ArchiveQuery {
+            tag_ids: ids,
+            ..Default::default()
+        };
+        assert_eq!(names(root, &query(vec![a1.id, a2.id])).len(), 2);
+        assert_eq!(names(root, &query(vec![a1.id, c1.id])), ["Alpha_100%.cbz"]);
+        assert!(names(root, &query(vec![a2.id, c1.id])).is_empty());
     }
 
     #[test]

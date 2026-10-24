@@ -25,7 +25,7 @@ export type ArchiveSummary = {
 export type ArchiveQuery = {
   search: string | null;
   favoritesOnly: boolean;
-  tagId: number | null;
+  tagIds: number[];
   sort: "name" | "recent";
 };
 

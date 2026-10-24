@@ -586,9 +586,40 @@ fn register_archive(
             ],
         )
         .map_err(|error| format!("アーカイブ情報をDBへ登録できませんでした: {error}"))?;
+    if let Some((classification, author)) = parse_filename_tags(filename) {
+        for (category, name) in [("classification", classification), ("author", author)] {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO tags (name, category) VALUES (?1, ?2)",
+                    params![name, category],
+                )
+                .map_err(|error| format!("タグを作成できませんでした: {error}"))?;
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO archive_tags (archive_id, tag_id)
+                     SELECT ?1, id FROM tags WHERE name = ?2 AND category = ?3",
+                    params![archive_id, name, category],
+                )
+                .map_err(|error| format!("タグを付けられませんでした: {error}"))?;
+        }
+    }
     transaction
         .commit()
         .map_err(|error| format!("アーカイブ情報の登録を確定できませんでした: {error}"))
+}
+
+const MAX_TAG_NAME_CHARS: usize = 100;
+
+// "(分類)[作者名]タイトル.拡張子" 形式のときだけ (分類, 作者名) を返す。
+fn parse_filename_tags(filename: &str) -> Option<(&str, &str)> {
+    let rest = filename.trim_start().strip_prefix('(')?;
+    let (classification, rest) = rest.split_once(')')?;
+    let rest = rest.trim_start().strip_prefix('[')?;
+    let (author, _title) = rest.split_once(']')?;
+    let classification = classification.trim();
+    let author = author.trim();
+    let valid = |name: &str| !name.is_empty() && name.chars().count() <= MAX_TAG_NAME_CHARS;
+    (valid(classification) && valid(author)).then_some((classification, author))
 }
 
 fn next_staging_name() -> String {
@@ -613,7 +644,28 @@ async fn remove_if_exists(path: &Path) {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_filename_tags;
     use super::{import_archive, ImportOutcome};
+
+    #[test]
+    fn parses_classification_and_author_from_filename() {
+        assert_eq!(
+            parse_filename_tags("(一般コミック)[山田太郎]タイトル.zip"),
+            Some(("一般コミック", "山田太郎"))
+        );
+        assert_eq!(parse_filename_tags("タイトル.zip"), None);
+        assert_eq!(
+            parse_filename_tags("(コミック) [作者名] とらのあな限定 小冊子.zip"),
+            Some(("コミック", "作者名"))
+        );
+        assert_eq!(
+            parse_filename_tags("( コミック )  [ 作者名 ]タイトル.zip"),
+            Some(("コミック", "作者名"))
+        );
+        assert_eq!(parse_filename_tags("(分類)タイトル.zip"), None);
+        assert_eq!(parse_filename_tags("()[作者]x.zip"), None);
+    }
+
     use crate::database;
     use image::{ImageEncoder, RgbImage};
     use sha2::{Digest, Sha256};

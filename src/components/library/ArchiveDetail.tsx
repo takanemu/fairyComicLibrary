@@ -128,7 +128,7 @@ export function ArchiveDetail({
         <div className="flex gap-2">
           <select
             aria-label="タグの分類"
-            className="rounded-lg border border-white/[0.08] bg-canvas px-2 py-2 text-xs text-slate-200"
+            className="rounded-lg border border-slate-300 bg-white px-2 py-2 text-xs text-slate-900"
             onChange={(event) => setCategory(event.target.value as TagCategory)}
             value={category}
           >
@@ -140,7 +140,7 @@ export function ArchiveDetail({
           </select>
           <input
             aria-label="タグ名"
-            className="min-w-0 flex-1 rounded-lg border border-white/[0.08] bg-canvas px-3 py-2 text-xs text-slate-200 placeholder:text-slate-600"
+            className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 placeholder:text-slate-500"
             maxLength={100}
             onChange={(event) => setName(event.target.value)}
             placeholder="タグ名を入力"

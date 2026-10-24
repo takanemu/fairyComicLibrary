@@ -50,7 +50,7 @@ function App() {
   const [view, setView] = useState<LibraryViewId>("all");
   const [searchText, setSearchText] = useState("");
   const [search, setSearch] = useState("");
-  const [tagId, setTagId] = useState<number | null>(null);
+  const [tagIds, setTagIds] = useState<number[]>([]);
   const [tags, setTags] = useState<TagWithCount[]>([]);
   const [version, setVersion] = useState(0);
   const importingRef = useRef(false);
@@ -131,11 +131,12 @@ function App() {
           return;
         }
         setTags(result);
-        setTagId((current) =>
-          current !== null && !result.some((tag) => tag.id === current)
-            ? null
-            : current,
-        );
+        setTagIds((current) => {
+          const remaining = current.filter((id) =>
+            result.some((tag) => tag.id === id),
+          );
+          return remaining.length === current.length ? current : remaining;
+        });
       })
       .catch((reason: unknown) => {
         if (!cancelled) {
@@ -151,12 +152,13 @@ function App() {
     () => ({
       search: search.trim() || null,
       favoritesOnly: view === "favorites",
-      tagId,
+      tagIds,
       sort: view === "recent" ? "recent" : "name",
     }),
-    [search, view, tagId],
+    [search, view, tagIds],
   );
-  const isFiltered = query.search !== null || tagId !== null || view === "favorites";
+  const isFiltered =
+    query.search !== null || tagIds.length > 0 || view === "favorites";
 
   const importPaths = useCallback(async (paths: string[]) => {
     if (importingRef.current || paths.length === 0) {
@@ -334,14 +336,20 @@ function App() {
                   </p>
                   {items.map((tag) => (
                     <button
-                      aria-pressed={tag.id === tagId}
+                      aria-pressed={tagIds.includes(tag.id)}
                       className={`flex w-full items-center justify-between gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition ${
-                        tag.id === tagId
+                        tagIds.includes(tag.id)
                           ? "bg-violet-400/15 text-violet-100"
                           : "text-slate-400 hover:bg-white/[0.04] hover:text-slate-200"
                       }`}
                       key={tag.id}
-                      onClick={() => setTagId(tag.id === tagId ? null : tag.id)}
+                      onClick={() =>
+                        setTagIds((current) =>
+                          current.includes(tag.id)
+                            ? current.filter((id) => id !== tag.id)
+                            : [...current, tag.id],
+                        )
+                      }
                       type="button"
                     >
                       <span className="truncate">{tag.name}</span>
@@ -404,7 +412,7 @@ function App() {
           </div>
         </header>
 
-        <section className="mx-auto flex min-h-[calc(100vh-77px)] max-w-5xl flex-col px-10 py-10">
+        <section className="mx-auto flex min-h-[calc(100vh-77px)] flex-col px-6 py-10">
           <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
             <div>
               <h2 className="text-2xl font-semibold tracking-tight">コレクション</h2>
