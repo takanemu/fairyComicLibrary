@@ -389,28 +389,11 @@ function App() {
               {navigation.find((item) => item.id === view)?.label}
             </h1>
           </div>
-          <div className="flex items-center gap-3">
-            <span className="rounded-full border border-violet-300/15 bg-violet-300/[0.07] px-3 py-1.5 text-[11px] font-medium text-violet-200">
-              開発フェーズ 5
-            </span>
-            <div
-              aria-label="ユーザー"
-              className="grid size-9 place-items-center rounded-full bg-slate-700/70 text-xs font-semibold text-slate-200"
-            >
-              FL
-            </div>
-          </div>
         </header>
 
-        <section className="mx-auto flex min-h-[calc(100vh-77px)] flex-col px-6 py-10">
-          <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
-            <div>
-              <h2 className="text-2xl font-semibold tracking-tight">コレクション</h2>
-              <p className="mt-2 text-sm text-slate-500">
-                アーカイブをまとめて、見つけやすく整理できます。
-              </p>
-            </div>
-            {repository && (
+        <section className="flex min-h-[calc(100vh-77px)] flex-col px-6 py-6">
+          {repository && (
+            <div className="mb-5 flex justify-end">
               <label className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.025] px-3 py-2 text-xs text-slate-300">
                 <span aria-hidden="true" className="text-slate-500">
                   ⌕
@@ -424,8 +407,8 @@ function App() {
                   value={searchText}
                 />
               </label>
-            )}
-          </div>
+            </div>
+          )}
 
           {error && (
             <div
