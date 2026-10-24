@@ -17,10 +17,21 @@ type Props = {
   isFiltered: boolean;
   onMutated: () => void;
   onError: (message: string | null) => void;
+  onCountChange: (count: number | null) => void;
 };
 
-export function LibraryView({ query, version, isFiltered, onMutated, onError }: Props) {
+export function LibraryView({
+  query,
+  version,
+  isFiltered,
+  onMutated,
+  onError,
+  onCountChange,
+}: Props) {
   const [archives, setArchives] = useState<ArchiveSummary[] | null>(null);
+  useEffect(() => {
+    onCountChange(archives ? archives.length : null);
+  }, [archives, onCountChange]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -86,7 +97,6 @@ export function LibraryView({ query, version, isFiltered, onMutated, onError }: 
 
   return (
     <>
-      <p className="mb-3 text-xs text-slate-500">{archives.length} 件</p>
       <ul className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-4">
         {archives.map((archive) => (
           <li key={archive.archiveId}>

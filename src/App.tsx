@@ -49,6 +49,7 @@ function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [view, setView] = useState<LibraryViewId>("all");
   const [searchText, setSearchText] = useState("");
+  const [archiveCount, setArchiveCount] = useState<number | null>(null);
   const [search, setSearch] = useState("");
   const [tagIds, setTagIds] = useState<number[]>([]);
   const [tags, setTags] = useState<TagWithCount[]>([]);
@@ -382,18 +383,20 @@ function App() {
       </aside>
 
       <main className="min-w-0 flex-1">
-        <header className="flex h-[76px] items-center justify-between border-b border-white/5 px-10">
+        <header className="flex h-12 items-center justify-between border-b border-white/5 px-10">
           <div>
-            <p className="text-xs text-slate-500">マイコレクション</p>
-            <h1 className="mt-1 text-lg font-semibold tracking-tight">
+            <h1 className="text-lg font-semibold tracking-tight">
               {navigation.find((item) => item.id === view)?.label}
             </h1>
           </div>
         </header>
 
-        <section className="flex min-h-[calc(100vh-77px)] flex-col px-6 py-6">
+        <section className="flex min-h-[calc(100vh-49px)] flex-col px-6 pb-6 pt-3">
           {repository && (
-            <div className="mb-5 flex justify-end">
+            <div className="mb-3 flex items-baseline justify-between gap-4">
+              <p className="text-xs text-slate-500">
+                {archiveCount !== null ? `${archiveCount} 件` : ""}
+              </p>
               <label className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.025] px-3 py-2 text-xs text-slate-300">
                 <span aria-hidden="true" className="text-slate-500">
                   ⌕
@@ -435,6 +438,7 @@ function App() {
           {repository ? (
             <LibraryView
               isFiltered={isFiltered}
+              onCountChange={setArchiveCount}
               onError={setError}
               onMutated={bumpVersion}
               query={query}
