@@ -149,6 +149,13 @@ fn archive_file(root: &Path, record: &ArchiveRecord) -> Result<PathBuf, String> 
     Ok(path)
 }
 
+pub fn archive_path(root: &Path, archive_id: &str) -> Result<PathBuf, String> {
+    let connection = Connection::open(root.join(DATABASE))
+        .map_err(|error| format!("SQLiteデータベースを開けませんでした: {error}"))?;
+    let record = archive_record(&connection, archive_id)?;
+    archive_file(root, &record)
+}
+
 pub fn list_cover_candidates(root: &Path, archive_id: &str) -> Result<Vec<String>, String> {
     let connection = Connection::open(root.join(DATABASE))
         .map_err(|error| format!("SQLiteデータベースを開けませんでした: {error}"))?;

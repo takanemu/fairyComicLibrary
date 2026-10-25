@@ -5,6 +5,7 @@ import {
   TagCategory,
   addTag,
   listArchives,
+  openInViewer,
   removeTag,
   regenerateThumbnail,
   setFavorite,
@@ -72,6 +73,15 @@ export function LibraryView({
     [onError, onMutated],
   );
 
+  const mutateless = async (action: () => Promise<unknown>, failure: string) => {
+    try {
+      await action();
+      onError(null);
+    } catch (reason) {
+      onError(`${failure}: ${String(reason)}`);
+    }
+  };
+
   const toggleFavorite = (archive: ArchiveSummary) =>
     mutate(
       () => setFavorite(archive.archiveId, !archive.isFavorite),
@@ -111,6 +121,12 @@ export function LibraryView({
               archive={archive}
               onSelect={() =>
                 setSelectedId(archive.archiveId === selectedId ? null : archive.archiveId)
+              }
+              onOpen={() =>
+                mutateless(
+                  () => openInViewer(archive.archiveId),
+                  "ビューアーを起動できませんでした",
+                )
               }
               onToggleFavorite={() => void toggleFavorite(archive)}
               selected={archive.archiveId === selectedId}

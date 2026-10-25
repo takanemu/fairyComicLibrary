@@ -5,10 +5,11 @@ type Props = {
   archive: ArchiveSummary;
   selected: boolean;
   onSelect: () => void;
+  onOpen: () => void;
   onToggleFavorite: () => void;
 };
 
-export function ArchiveCard({ archive, selected, onSelect, onToggleFavorite }: Props) {
+export function ArchiveCard({ archive, selected, onSelect, onOpen, onToggleFavorite }: Props) {
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const url = thumbnailUrl(archive.archiveId);
 
@@ -24,6 +25,7 @@ export function ArchiveCard({ archive, selected, onSelect, onToggleFavorite }: P
         aria-label={`${archive.filename} の詳細を開く`}
         className="block w-full text-left"
         onClick={onSelect}
+        onDoubleClick={onOpen}
         type="button"
       >
         <div className="grid aspect-[2/3] w-full place-items-center overflow-hidden bg-black/20">

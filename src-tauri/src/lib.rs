@@ -55,6 +55,7 @@ pub fn run() {
             commands::regenerate_thumbnail,
             commands::regenerate_missing_thumbnails,
             commands::list_cover_candidates,
+            commands::open_in_viewer,
             commands::convert_archive,
             commands::cancel_conversion,
         ])

@@ -33,6 +33,9 @@ export type ArchiveQuery = {
 export const listArchives = (query: ArchiveQuery) =>
   invoke<ArchiveSummary[]>("list_archives", { query });
 
+export const openInViewer = (archiveId: string) =>
+invoke<void>("open_in_viewer", { archiveId });
+
 export const listTags = () => invoke<TagWithCount[]>("list_tags");
 
 export const setFavorite = (archiveId: string, isFavorite: boolean) =>

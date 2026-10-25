@@ -27,6 +27,7 @@
   "bundle": {
     "active": true,
     "targets": ["appimage"],
+    "externalBin": ["binaries/brave-comic-viewer"],
     "icon": ["icons/icon.png"]
   }
 }
