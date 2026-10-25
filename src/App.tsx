@@ -12,6 +12,7 @@ import { ConvertResult } from "./components/library/ConvertDialog";
 import { LibraryView } from "./components/library/LibraryView";
 import {
   ArchiveQuery,
+  TagCategory,
   TagWithCount,
   listTags,
   cancelConversion,
@@ -102,6 +103,9 @@ function App() {
   const [search, setSearch] = useState("");
   const [tagIds, setTagIds] = useState<number[]>([]);
   const [tags, setTags] = useState<TagWithCount[]>([]);
+  const [expandedTagCategories, setExpandedTagCategories] = useState<
+    Record<TagCategory, boolean>
+  >({ author: true, series: true, classification: true });
   const [version, setVersion] = useState(0);
   const [isConverting, setIsConverting] = useState(false);
   const importingRef = useRef(false);
@@ -473,39 +477,66 @@ function App() {
         </nav>
 
         {tags.length > 0 && (
-          <div className="mt-6 min-h-0 flex-1 overflow-y-auto pr-1">
+          <div className="mt-6 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
             {tagCategories.map((category) => {
               const items = tags.filter((tag) => tag.category === category.value);
               if (items.length === 0) {
                 return null;
               }
+              const expanded = expandedTagCategories[category.value];
+              const selectedCount = items.filter((tag) => tagIds.includes(tag.id)).length;
+              const categoryId = `tag-category-${category.value}`;
               return (
                 <div className="mb-4" key={category.value}>
-                  <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
-                    {category.label}
-                  </p>
-                  {items.map((tag) => (
-                    <button
-                      aria-pressed={tagIds.includes(tag.id)}
-                      className={`flex w-full items-center justify-between gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition ${
-                        tagIds.includes(tag.id)
-                          ? "bg-violet-400/15 text-violet-100"
-                          : "text-slate-400 hover:bg-white/[0.04] hover:text-slate-200"
-                      }`}
-                      key={tag.id}
-                      onClick={() =>
-                        setTagIds((current) =>
-                          current.includes(tag.id)
-                            ? current.filter((id) => id !== tag.id)
-                            : [...current, tag.id],
-                        )
-                      }
-                      type="button"
-                    >
-                      <span className="truncate">{tag.name}</span>
-                      <span className="text-[10px] text-slate-600">{tag.archiveCount}</span>
-                    </button>
-                  ))}
+                  <button
+                    aria-controls={categoryId}
+                    aria-expanded={expanded}
+                    className="mb-1 flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500 transition hover:bg-white/[0.04] hover:text-slate-300"
+                    onClick={() =>
+                      setExpandedTagCategories((current) => ({
+                        ...current,
+                        [category.value]: !current[category.value],
+                      }))
+                    }
+                    type="button"
+                  >
+                    <span className="flex items-center gap-2">
+                      <span aria-hidden="true">{expanded ? "⌄" : "›"}</span>
+                      {category.label}
+                      <span className="text-[10px] tracking-normal text-slate-600">
+                        {selectedCount > 0 ? `${selectedCount}/` : ""}
+                        {items.length}
+                      </span>
+                    </span>
+                  </button>
+                  <div
+                    className="space-y-0.5"
+                    hidden={!expanded}
+                    id={categoryId}
+                  >
+                    {items.map((tag) => (
+                      <button
+                        aria-pressed={tagIds.includes(tag.id)}
+                        className={`flex w-full items-center justify-between gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition ${
+                          tagIds.includes(tag.id)
+                            ? "bg-violet-400/15 text-violet-100"
+                            : "text-slate-400 hover:bg-white/[0.04] hover:text-slate-200"
+                        }`}
+                        key={tag.id}
+                        onClick={() =>
+                          setTagIds((current) =>
+                            current.includes(tag.id)
+                              ? current.filter((id) => id !== tag.id)
+                              : [...current, tag.id],
+                          )
+                        }
+                        type="button"
+                      >
+                        <span className="truncate">{tag.name}</span>
+                        <span className="text-[10px] text-slate-600">{tag.archiveCount}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               );
             })}
