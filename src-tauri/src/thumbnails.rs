@@ -94,6 +94,81 @@ fn is_selectable_image(name: &str) -> bool {
     is_supported_image(name) && !name.split(['/', '\\']).any(|part| part == "..")
 }
 
+fn is_page_image(name: &str) -> bool {
+    matches!(
+        Path::new(name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "avif")
+    ) && !name.split(['/', '\\']).any(|part| part == "..")
+}
+
+pub fn count_pages(archive_path: &Path, format: &str) -> Result<u64, String> {
+    let count = match format {
+        "zip" | "cbz" => {
+            let file = File::open(archive_path)
+                .map_err(|error| format!("ZIPアーカイブを開けませんでした: {error}"))?;
+            let archive = ZipArchive::new(file)
+                .map_err(|error| format!("ZIPアーカイブが不正です: {error}"))?;
+            if archive.len() > MAX_ARCHIVE_ENTRIES {
+                return Err(format!(
+                    "アーカイブのエントリー数が上限（{MAX_ARCHIVE_ENTRIES}件）を超えています。"
+                ));
+            }
+            archive
+                .file_names()
+                .filter(|name| !name.ends_with('/') && is_page_image(name))
+                .count() as u64
+        }
+        "7z" => {
+            let reader =
+                sevenz_rust::SevenZReader::open(archive_path, sevenz_rust::Password::empty())
+                    .map_err(|error| format!("7zアーカイブを開けませんでした: {error}"))?;
+            let entries = &reader.archive().files;
+            if entries.len() > MAX_ARCHIVE_ENTRIES {
+                return Err(format!(
+                    "アーカイブのエントリー数が上限（{MAX_ARCHIVE_ENTRIES}件）を超えています。"
+                ));
+            }
+            entries
+                .iter()
+                .filter(|entry| !entry.is_directory() && is_page_image(entry.name()))
+                .count() as u64
+        }
+        "rar" | "cbr" => {
+            let mut archive = unrar::Archive::new(archive_path)
+                .open_for_processing()
+                .map_err(|error| format!("RARアーカイブを開けませんでした: {error}"))?;
+            let mut count = 0_u64;
+            let mut entries = 0_usize;
+            while let Some(entry) = archive
+                .read_header()
+                .map_err(|error| format!("RAR内のファイル一覧を読み込めませんでした: {error}"))?
+            {
+                entries += 1;
+                if entries > MAX_ARCHIVE_ENTRIES {
+                    return Err(format!(
+                        "アーカイブのエントリー数が上限（{MAX_ARCHIVE_ENTRIES}件）を超えています。"
+                    ));
+                }
+                let header = entry.entry();
+                let name = header.filename.to_string_lossy();
+                if !header.is_directory() && is_page_image(&name) {
+                    count += 1;
+                }
+                archive = entry
+                    .skip()
+                    .map_err(|error| format!("RAR内のファイルを読み飛ばせませんでした: {error}"))?;
+            }
+            count
+        }
+        _ => return Err(unsupported(format)),
+    };
+    Ok(count)
+}
+
 // 表紙の選択肢として、アーカイブ内の画像エントリー名を返す（展開はしない）。
 pub fn list_images(archive_path: &Path, format: &str) -> Result<Vec<String>, String> {
     let mut names = match format {
@@ -633,6 +708,27 @@ mod tests {
         let image = image::open(output_path).expect("decode WebP");
         assert_eq!(image.width(), THUMBNAIL_MAX_WIDTH);
         assert!(image.height() <= THUMBNAIL_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn counts_image_entries_as_pages_and_includes_converted_avif() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let archive_path = directory.path().join("comic.cbz");
+        write_zip(
+            &archive_path,
+            &[
+                ("pages/001.png", b"png"),
+                ("pages/002.JPG", b"jpg"),
+                ("pages/003.avif", b"avif"),
+                ("notes.txt", b"text"),
+                ("../outside.png", b"unsafe"),
+            ],
+        );
+
+        assert_eq!(
+            super::count_pages(&archive_path, "cbz").expect("count pages"),
+            3
+        );
     }
 
     #[test]

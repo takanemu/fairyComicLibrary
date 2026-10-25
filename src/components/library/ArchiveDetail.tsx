@@ -101,6 +101,12 @@ export function ArchiveDetail({
           <dd className="uppercase text-slate-300">{archive.format}</dd>
         </div>
         <div className="flex justify-between">
+          <dt>ページ数</dt>
+          <dd className="text-slate-300">
+            {archive.pageCount === null ? "不明" : `${archive.pageCount} ページ`}
+          </dd>
+        </div>
+        <div className="flex justify-between">
           <dt>サイズ</dt>
           <dd className="text-slate-300">{formatFileSize(archive.fileSize)}</dd>
         </div>

@@ -86,6 +86,7 @@ struct Record {
     original_path: Option<String>,
     relative_path: String,
     format: String,
+    page_count: Option<u64>,
     thumbnail_relative_path: Option<String>,
     is_favorite: i64,
     imported_at: String,
@@ -114,7 +115,7 @@ fn load_record(connection: &Connection, archive_id: &str) -> Result<Record, Stri
     }
     connection
         .query_row(
-            "SELECT original_filename, original_path, relative_path, format,
+            "SELECT original_filename, original_path, relative_path, format, page_count,
                     thumbnail_relative_path, is_favorite, imported_at
              FROM archives WHERE archive_id = ?1",
             [archive_id],
@@ -124,9 +125,12 @@ fn load_record(connection: &Connection, archive_id: &str) -> Result<Record, Stri
                     original_path: row.get(1)?,
                     relative_path: row.get(2)?,
                     format: row.get(3)?,
-                    thumbnail_relative_path: row.get(4)?,
-                    is_favorite: row.get(5)?,
-                    imported_at: row.get(6)?,
+                    page_count: row
+                        .get::<_, Option<i64>>(4)?
+                        .map(|count| count.max(0) as u64),
+                    thumbnail_relative_path: row.get(5)?,
+                    is_favorite: row.get(6)?,
+                    imported_at: row.get(7)?,
                 })
             },
         )
@@ -696,6 +700,11 @@ fn register(
 ) -> Result<(), String> {
     let file_size = i64::try_from(file_size)
         .map_err(|_| "アーカイブのサイズがDBで扱える範囲を超えています。".to_string())?;
+    let page_count = record
+        .page_count
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| "ページ数がDBで扱える範囲を超えています。".to_string())?;
     let transaction = connection
         .unchecked_transaction()
         .map_err(|error| format!("DBトランザクションを開始できませんでした: {error}"))?;
@@ -703,8 +712,9 @@ fn register(
         transaction.execute(
             "INSERT INTO archives (
                 archive_id, original_filename, original_path, relative_path, format,
-                file_size, thumbnail_relative_path, is_favorite, imported_at, converted_from
-             ) VALUES (?1, ?2, ?3, ?4, '7z', ?5, ?6, ?7, ?8, ?9)",
+                file_size, thumbnail_relative_path, is_favorite, imported_at, converted_from,
+                page_count
+             ) VALUES (?1, ?2, ?3, ?4, '7z', ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 new_id,
                 filename,
@@ -715,6 +725,7 @@ fn register(
                 record.is_favorite,
                 record.imported_at,
                 old_id,
+                page_count,
             ],
         )?;
         transaction.execute(
@@ -777,12 +788,26 @@ mod tests {
         std::fs::write(thumbnail_dir.join(format!("{id}.webp")), b"RIFFthumb").expect("thumb");
 
         let connection = Connection::open(root.path().join(DATABASE)).expect("open");
+        let page_count = entries
+            .iter()
+            .filter(|(name, _)| {
+                Path::new(name)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        matches!(
+                            extension.to_ascii_lowercase().as_str(),
+                            "jpg" | "jpeg" | "png"
+                        )
+                    })
+            })
+            .count() as i64;
         connection
             .execute(
                 "INSERT INTO archives (archive_id, original_filename, relative_path, format,
-                    file_size, thumbnail_relative_path, is_favorite, imported_at)
-                 VALUES (?1, 'sample.cbz', 'archives/ab/sample.cbz', 'cbz', ?2, ?3, 1, '2026-01-01T00:00:00Z')",
-                params![id, size as i64, format!("thumbnails/ab/{id}.webp")],
+                    file_size, thumbnail_relative_path, is_favorite, imported_at, page_count)
+                 VALUES (?1, 'sample.cbz', 'archives/ab/sample.cbz', 'cbz', ?2, ?3, 1, '2026-01-01T00:00:00Z', ?4)",
+                params![id, size as i64, format!("thumbnails/ab/{id}.webp"), page_count],
             )
             .expect("insert");
         connection
@@ -830,16 +855,17 @@ mod tests {
         assert!(phases.contains(&"verify") && phases.contains(&"finalize"));
 
         let connection = Connection::open(root.path().join(DATABASE)).expect("open");
-        let (favorite, converted_from, format): (i64, String, String) = connection
+        let (favorite, converted_from, format, page_count): (i64, String, String, i64) = connection
             .query_row(
-                "SELECT is_favorite, converted_from, format FROM archives WHERE archive_id = ?1",
+                "SELECT is_favorite, converted_from, format, page_count
+                 FROM archives WHERE archive_id = ?1",
                 [&archive_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .expect("new row");
         assert_eq!(
-            (favorite, converted_from, format),
-            (1, old_id.clone(), "7z".to_string())
+            (favorite, converted_from, format, page_count),
+            (1, old_id.clone(), "7z".to_string(), 4)
         );
         let tags: i64 = connection
             .query_row(

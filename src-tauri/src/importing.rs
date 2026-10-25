@@ -90,6 +90,28 @@ pub async fn import_archive(
         });
     }
 
+    let count_path = staging_path.clone();
+    let count_format = extension.clone();
+    let page_count = match tokio::task::spawn_blocking(move || {
+        crate::thumbnails::count_pages(&count_path, &count_format)
+    })
+    .await
+    {
+        Ok(Ok(count)) => count,
+        Ok(Err(error)) => {
+            remove_if_exists(&staging_path).await;
+            return Err(format!(
+                "ページ数を取得できなかったため、インポートを中止しました: {error}"
+            ));
+        }
+        Err(error) => {
+            remove_if_exists(&staging_path).await;
+            return Err(format!(
+                "ページ数の取得処理に失敗したため、インポートを中止しました: {error}"
+            ));
+        }
+    };
+
     let relative_path = format!("archives/{}/{}", &archive_id[..2], filename);
     let destination = repository_root.join(&relative_path);
     let destination_directory = destination
@@ -245,6 +267,7 @@ pub async fn import_archive(
         &thumbnail_relative_path,
         &extension,
         file_size,
+        page_count,
     ) {
         let archive_rollback_error = rollback_archive(&destination, destination_created).await;
         let thumbnail_rollback_error =
@@ -559,9 +582,12 @@ fn register_archive(
     thumbnail_relative_path: &str,
     format: &str,
     file_size: u64,
+    page_count: u64,
 ) -> Result<(), String> {
     let file_size = i64::try_from(file_size)
         .map_err(|_| "アーカイブのサイズがDBで扱える範囲を超えています。".to_string())?;
+    let page_count = i64::try_from(page_count)
+        .map_err(|_| "ページ数がDBで扱える範囲を超えています。".to_string())?;
     let mut connection = Connection::open(database_path)
         .map_err(|error| format!("ライブラリDBを開けませんでした: {error}"))?;
     let transaction = connection
@@ -571,15 +597,16 @@ fn register_archive(
         .execute(
             "INSERT INTO archives (
                 archive_id, original_filename, original_path, relative_path,
-                format, file_size, thumbnail_relative_path, imported_at
-            ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+                format, file_size, thumbnail_relative_path, imported_at, page_count
+            ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?7)",
             params![
                 archive_id,
                 filename,
                 relative_path,
                 format,
                 file_size,
-                thumbnail_relative_path
+                thumbnail_relative_path,
+                page_count
             ],
         )
         .map_err(|error| format!("アーカイブ情報をDBへ登録できませんでした: {error}"))?;

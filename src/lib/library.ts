@@ -15,6 +15,7 @@ export type ArchiveSummary = {
   archiveId: string;
   filename: string;
   format: string;
+  pageCount: number | null;
   fileSize: number;
   importedAt: string;
   isFavorite: boolean;

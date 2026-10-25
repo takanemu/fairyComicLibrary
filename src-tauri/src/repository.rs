@@ -76,7 +76,8 @@ pub fn open(path: &Path) -> Result<RepositoryStatus, String> {
         eprintln!("旧サムネイルの移行を完了できませんでした: {error}");
     }
 
-    let warnings = crate::maintenance::verify(&root)?.warnings;
+    let mut warnings = crate::maintenance::verify(&root)?.warnings;
+    warnings.extend(crate::library::backfill_page_counts(&root)?);
 
     Ok(RepositoryStatus {
         path: root.to_string_lossy().into_owned(),
@@ -171,7 +172,7 @@ mod tests {
         let second = open(directory.path()).expect("reopen repository");
 
         assert_eq!(first.path, second.path);
-        assert_eq!(first.schema_version, 2);
+        assert_eq!(first.schema_version, 3);
         assert_eq!(first.archive_count, 0);
         for relative_path in [
             "repository.json",

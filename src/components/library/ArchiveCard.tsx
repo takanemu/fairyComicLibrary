@@ -46,7 +46,7 @@ export function ArchiveCard({ archive, selected, onSelect, onToggleFavorite }: P
             {archive.filename}
           </p>
           <p className="mt-1 text-[10px] uppercase tracking-wide text-slate-500">
-            {archive.format}
+            {archive.pageCount === null ? "ページ数不明" : `${archive.pageCount} ページ`}
           </p>
         </div>
       </button>

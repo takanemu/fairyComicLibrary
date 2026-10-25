@@ -29,6 +29,7 @@ pub struct ArchiveSummary {
     pub archive_id: String,
     pub filename: String,
     pub format: String,
+    pub page_count: Option<u64>,
     pub file_size: u64,
     pub imported_at: String,
     pub is_favorite: bool,
@@ -115,7 +116,7 @@ pub fn list_archives(
         )
     };
     let sql = format!(
-        "SELECT a.archive_id, a.original_filename, a.format, a.file_size,
+        "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
                 a.imported_at, a.is_favorite, a.thumbnail_relative_path IS NOT NULL
          FROM archives a
          WHERE (:favorites = 0 OR a.is_favorite = 1)
@@ -143,10 +144,13 @@ pub fn list_archives(
                     archive_id: row.get(0)?,
                     filename: row.get(1)?,
                     format: row.get(2)?,
-                    file_size: row.get::<_, i64>(3)?.max(0) as u64,
-                    imported_at: row.get(4)?,
-                    is_favorite: row.get::<_, i64>(5)? != 0,
-                    has_thumbnail: row.get::<_, i64>(6)? != 0,
+                    page_count: row
+                        .get::<_, Option<i64>>(3)?
+                        .map(|count| count.max(0) as u64),
+                    file_size: row.get::<_, i64>(4)?.max(0) as u64,
+                    imported_at: row.get(5)?,
+                    is_favorite: row.get::<_, i64>(6)? != 0,
+                    has_thumbnail: row.get::<_, i64>(7)? != 0,
                     tags: Vec::new(),
                 })
             },
@@ -185,6 +189,68 @@ pub fn list_archives(
             .unwrap_or_default();
     }
     Ok(archives)
+}
+
+pub fn backfill_page_counts(repository_root: &Path) -> Result<Vec<String>, String> {
+    let connection = open(repository_root)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT archive_id, original_filename, relative_path, format
+             FROM archives WHERE page_count IS NULL",
+        )
+        .map_err(|error| format!("ページ数が未登録のアーカイブを確認できませんでした: {error}"))?;
+    let records = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(|error| format!("ページ数が未登録のアーカイブを読み取れませんでした: {error}"))?;
+    drop(statement);
+
+    let mut failures = Vec::new();
+    for (archive_id, filename, relative_path, format) in records {
+        if !crate::maintenance::is_safe_relative(&relative_path) {
+            failures.push(format!("{filename}: 保存先パスが不正です"));
+            continue;
+        }
+        let archive_path = repository_root.join(&relative_path);
+        match crate::thumbnails::count_pages(&archive_path, &format) {
+            Ok(page_count) => {
+                let page_count = i64::try_from(page_count)
+                    .map_err(|_| format!("{filename}: ページ数がDBで扱える範囲を超えています"))?;
+                connection
+                    .execute(
+                        "UPDATE archives SET page_count = ?1
+                         WHERE archive_id = ?2 AND page_count IS NULL",
+                        params![page_count, archive_id],
+                    )
+                    .map_err(|error| {
+                        format!("{filename}: ページ数を保存できませんでした: {error}")
+                    })?;
+            }
+            Err(error) => failures.push(format!("{filename}: {error}")),
+        }
+    }
+
+    if failures.is_empty() {
+        return Ok(Vec::new());
+    }
+    let samples = failures
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("、");
+    let more = if failures.len() > 5 { " ほか" } else { "" };
+    Ok(vec![format!(
+        "ページ数を取得できないアーカイブが{}件あります（{samples}{more}）。アーカイブの状態を確認してください。",
+        failures.len()
+    )])
 }
 
 pub fn list_tags(repository_root: &Path) -> Result<Vec<TagWithCount>, String> {
@@ -355,6 +421,43 @@ mod tests {
                 .expect("insert archive");
         }
         repository
+    }
+
+    #[test]
+    fn backfills_page_counts_for_existing_archives() {
+        use std::io::Write;
+        use zip::{write::SimpleFileOptions, ZipWriter};
+
+        let repository = repository_with_archives();
+        let id = id(0);
+        let archive_directory = repository.path().join("archives/00");
+        std::fs::create_dir_all(&archive_directory).expect("archive directory");
+        let mut zip = ZipWriter::new(
+            std::fs::File::create(archive_directory.join("Alpha_100%.cbz")).expect("archive"),
+        );
+        for name in ["001.png", "002.jpg", "notes.txt"] {
+            zip.start_file(name, SimpleFileOptions::default())
+                .expect("start entry");
+            zip.write_all(b"file").expect("write entry");
+        }
+        zip.finish().expect("finish archive");
+
+        Connection::open(repository.path().join("database/library.sqlite3"))
+            .expect("open database")
+            .execute(
+                "UPDATE archives SET page_count = 0 WHERE archive_id != ?1",
+                [&id],
+            )
+            .expect("mark other page counts as known");
+        assert!(super::backfill_page_counts(repository.path())
+            .expect("backfill")
+            .is_empty());
+        let archive = list_archives(repository.path(), &ArchiveQuery::default())
+            .expect("list")
+            .into_iter()
+            .find(|archive| archive.archive_id == id)
+            .expect("archive summary");
+        assert_eq!(archive.page_count, Some(2));
     }
 
     fn id(index: usize) -> String {

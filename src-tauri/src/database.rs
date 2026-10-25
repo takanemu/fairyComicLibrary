@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 pub fn initialize(path: &Path) -> Result<u64, String> {
     let connection = Connection::open(path)
@@ -86,6 +86,26 @@ pub fn initialize(path: &Path) -> Result<u64, String> {
                 .commit()
                 .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
         }
+    }
+
+    let current = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+        .map_err(|error| format!("SQLiteスキーマバージョンを読み取れませんでした: {error}"))?;
+    if current < 3 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLiteスキーマの更新を開始できませんでした: {error}"))?;
+        transaction
+            .execute_batch(
+                "
+                ALTER TABLE archives ADD COLUMN page_count INTEGER CHECK(page_count >= 0);
+                PRAGMA user_version = 3;
+                ",
+            )
+            .map_err(|error| format!("SQLiteスキーマをv3へ更新できませんでした: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
     }
 
     for table in ["archives", "tags", "archive_tags"] {
