@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArchiveSummary, thumbnailUrl } from "../../lib/library";
 
 type Props = {
@@ -12,6 +12,30 @@ type Props = {
 export function ArchiveCard({ archive, selected, onSelect, onOpen, onToggleFavorite }: Props) {
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const url = thumbnailUrl(archive.archiveId);
+  const clickTimer = useRef<number | null>(null);
+
+  const cancelPendingSelect = () => {
+    if (clickTimer.current !== null) {
+      window.clearTimeout(clickTimer.current);
+      clickTimer.current = null;
+    }
+  };
+
+  useEffect(() => cancelPendingSelect, []);
+
+  // ダブルクリックでは詳細ペインを開閉しないよう、選択を遅延して取り消せるようにする
+  const handleClick = () => {
+    cancelPendingSelect();
+    clickTimer.current = window.setTimeout(() => {
+      clickTimer.current = null;
+      onSelect();
+    }, 250);
+  };
+
+  const handleDoubleClick = () => {
+    cancelPendingSelect();
+    onOpen();
+  };
 
   return (
     <div
@@ -22,10 +46,10 @@ export function ArchiveCard({ archive, selected, onSelect, onOpen, onToggleFavor
       }`}
     >
       <button
-        aria-label={`${archive.filename} の詳細を開く`}
+        aria-label={`${archive.filename} の詳細を表示`}
         className="block w-full text-left"
-        onClick={onSelect}
-        onDoubleClick={onOpen}
+        onClick={handleClick}
+        onDoubleClick={handleDoubleClick}
         type="button"
       >
         <div className="grid aspect-[2/3] w-full place-items-center overflow-hidden bg-black/20">

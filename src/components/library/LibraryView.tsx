@@ -120,7 +120,9 @@ export function LibraryView({
             <ArchiveCard
               archive={archive}
               onSelect={() =>
-                setSelectedId(archive.archiveId === selectedId ? null : archive.archiveId)
+                setSelectedId((current) =>
+                  current === archive.archiveId ? null : archive.archiveId,
+                )
               }
               onOpen={() =>
                 mutateless(
