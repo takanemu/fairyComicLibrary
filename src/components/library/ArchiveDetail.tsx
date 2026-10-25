@@ -4,6 +4,7 @@ import {
   ArchiveSummary,
   TagCategory,
   formatFileSize,
+  isConvertible,
   tagCategories,
   thumbnailUrl,
 } from "../../lib/library";
@@ -15,6 +16,7 @@ type Props = {
   onAddTag: (category: TagCategory, name: string) => Promise<void>;
   onRemoveTag: (tagId: number) => Promise<void>;
   onRegenerateCover: (entryName: string | null) => Promise<void>;
+  onConvert: () => void;
 };
 
 export function ArchiveDetail({
@@ -24,6 +26,7 @@ export function ArchiveDetail({
   onAddTag,
   onRemoveTag,
   onRegenerateCover,
+  onConvert,
 }: Props) {
   const [coverBusy, setCoverBusy] = useState(false);
   const [picking, setPicking] = useState(false);
@@ -142,6 +145,17 @@ export function ArchiveDetail({
           表紙を選ぶ
         </button>
       </div>
+      {isConvertible(archive.format) && (
+        <button
+          className="mt-2 w-full rounded-lg border border-white/[0.08] px-2 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:opacity-50"
+          disabled={coverBusy}
+          onClick={onConvert}
+          title="PNG/JPEGをAVIFへ変換し、7zで再アーカイブします"
+          type="button"
+        >
+          7z + AVIF へ変換
+        </button>
+      )}
       {picking && (
         <CoverPicker
           archiveId={archive.archiveId}

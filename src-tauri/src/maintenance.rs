@@ -23,7 +23,7 @@ pub struct BackupSummary {
     pub file_count: u64,
 }
 
-fn is_safe_relative(path: &str) -> bool {
+pub(crate) fn is_safe_relative(path: &str) -> bool {
     let path = Path::new(path);
     !path.as_os_str().is_empty()
         && path

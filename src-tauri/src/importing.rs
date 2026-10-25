@@ -543,7 +543,7 @@ fn find_archive(database_path: &Path, archive_id: &str) -> Result<Option<String>
         .map_err(|error| format!("ライブラリDBを開けませんでした: {error}"))?;
     connection
         .query_row(
-            "SELECT relative_path FROM archives WHERE archive_id = ?1",
+            "SELECT relative_path FROM archives WHERE archive_id = ?1 OR converted_from = ?1",
             [archive_id],
             |row| row.get::<_, String>(0),
         )

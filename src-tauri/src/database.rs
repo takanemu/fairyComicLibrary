@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 pub fn initialize(path: &Path) -> Result<u64, String> {
     let connection = Connection::open(path)
@@ -62,6 +62,30 @@ pub fn initialize(path: &Path) -> Result<u64, String> {
         transaction
             .commit()
             .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
+    }
+
+    if version < 2 {
+        // v1のDBは、後続の初期化（version == 0）で作られた直後も含めここで v2 へ上げる。
+        let current = connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .map_err(|error| format!("SQLiteスキーマバージョンを読み取れませんでした: {error}"))?;
+        if current < 2 {
+            let transaction = connection
+                .unchecked_transaction()
+                .map_err(|error| format!("SQLiteスキーマの更新を開始できませんでした: {error}"))?;
+            transaction
+                .execute_batch(
+                    "
+                    ALTER TABLE archives ADD COLUMN converted_from TEXT;
+                    CREATE INDEX idx_archives_converted_from ON archives(converted_from);
+                    PRAGMA user_version = 2;
+                    ",
+                )
+                .map_err(|error| format!("SQLiteスキーマをv2へ更新できませんでした: {error}"))?;
+            transaction
+                .commit()
+                .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
+        }
     }
 
     for table in ["archives", "tags", "archive_tags"] {

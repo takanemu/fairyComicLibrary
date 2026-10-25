@@ -1,4 +1,4 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { Channel, convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 export type TagCategory = "author" | "series" | "classification";
 
@@ -89,3 +89,43 @@ export function formatFileSize(bytes: number): string {
   }
   return `${unit === 0 ? value : value.toFixed(1)} ${units[unit]}`;
 }
+
+export type ConvertPhase = "analyze" | "convert" | "write" | "verify" | "finalize";
+
+export type ConvertProgress = {
+  phase: ConvertPhase;
+  doneEntries: number;
+  totalEntries: number;
+  doneBytes: number;
+  totalBytes: number;
+  currentName: string | null;
+  cancellable: boolean;
+};
+
+export type ConvertOutcome =
+  | {
+      status: "converted";
+      archiveId: string;
+      relativePath: string;
+      originalSize: number;
+      newSize: number;
+      convertedImages: number;
+      unchangedEntries: number;
+      warning: string | null;
+    }
+  | { status: "duplicate"; archiveId: string; relativePath: string }
+  | { status: "notSmaller"; originalSize: number; newSize: number }
+  | { status: "cancelled" };
+
+export const convertArchive = (
+  archiveId: string,
+  onProgress: (progress: ConvertProgress) => void,
+) => {
+  const channel = new Channel<ConvertProgress>();
+  channel.onmessage = onProgress;
+  return invoke<ConvertOutcome>("convert_archive", { archiveId, onProgress: channel });
+};
+
+export const cancelConversion = () => invoke<void>("cancel_conversion");
+
+export const isConvertible = (format: string) => format === "zip" || format === "cbz";

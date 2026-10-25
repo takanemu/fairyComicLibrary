@@ -167,3 +167,26 @@ pub async fn list_cover_candidates(
     })
     .await
 }
+
+#[tauri::command]
+pub async fn convert_archive(
+    archive_id: String,
+    on_progress: tauri::ipc::Channel<crate::conversion::ConvertProgress>,
+    state: State<'_, AppState>,
+) -> Result<crate::conversion::ConvertOutcome, String> {
+    let cancel = state.convert_cancel.clone();
+    cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+    with_exclusive_repository(&state, move |root| {
+        crate::conversion::convert_archive(&root, &archive_id, &cancel, &mut |progress| {
+            let _ = on_progress.send(progress);
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub fn cancel_conversion(state: State<'_, AppState>) {
+    state
+        .convert_cancel
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+}

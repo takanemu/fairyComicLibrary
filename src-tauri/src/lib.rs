@@ -1,4 +1,5 @@
 mod commands;
+mod conversion;
 mod database;
 mod importing;
 mod library;
@@ -6,13 +7,17 @@ mod maintenance;
 mod repository;
 mod thumbnails;
 
-use std::{borrow::Cow, sync::Mutex};
+use std::{
+    borrow::Cow,
+    sync::{atomic::AtomicBool, Arc, Mutex},
+};
 use tauri::{http, Manager};
 use tokio::sync::Mutex as AsyncMutex;
 
 pub struct AppState {
     repository_path: Mutex<Option<std::path::PathBuf>>,
     import_lock: AsyncMutex<()>,
+    convert_cancel: Arc<AtomicBool>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -23,6 +28,7 @@ pub fn run() {
         .manage(AppState {
             repository_path: Mutex::new(None),
             import_lock: AsyncMutex::new(()),
+            convert_cancel: Arc::new(AtomicBool::new(false)),
         })
         .register_asynchronous_uri_scheme_protocol("thumbnail", |context, request, responder| {
             let state = context.app_handle().state::<AppState>();
@@ -49,6 +55,8 @@ pub fn run() {
             commands::regenerate_thumbnail,
             commands::regenerate_missing_thumbnails,
             commands::list_cover_candidates,
+            commands::convert_archive,
+            commands::cancel_conversion,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Fairy Comic Library");

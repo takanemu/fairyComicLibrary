@@ -71,6 +71,7 @@ pub fn open(path: &Path) -> Result<RepositoryStatus, String> {
 
     let database_path = root.join("database/library.sqlite3");
     let archive_count = database::initialize(&database_path)?;
+    remove_stale_conversions(&root);
     if let Err(error) = crate::thumbnails::migrate_avif_thumbnails(&root) {
         eprintln!("旧サムネイルの移行を完了できませんでした: {error}");
     }
@@ -83,6 +84,24 @@ pub fn open(path: &Path) -> Result<RepositoryStatus, String> {
         archive_count,
         warnings,
     })
+}
+
+// 変換中の異常終了で残った一時ファイルを片付ける。
+fn remove_stale_conversions(root: &Path) {
+    for directory in ["archives/.staging", "thumbnails/.staging"] {
+        let Ok(entries) = std::fs::read_dir(root.join(directory)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".convert.part")
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 pub fn load_saved_repository(app: &AppHandle) -> Result<Option<RepositoryStatus>, String> {
@@ -152,7 +171,7 @@ mod tests {
         let second = open(directory.path()).expect("reopen repository");
 
         assert_eq!(first.path, second.path);
-        assert_eq!(first.schema_version, 1);
+        assert_eq!(first.schema_version, 2);
         assert_eq!(first.archive_count, 0);
         for relative_path in [
             "repository.json",

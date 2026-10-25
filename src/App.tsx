@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import {
   isPermissionGranted,
   requestPermission,
@@ -7,11 +7,15 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { ConvertResult } from "./components/library/ConvertDialog";
 import { LibraryView } from "./components/library/LibraryView";
 import {
   ArchiveQuery,
   TagWithCount,
   listTags,
+  cancelConversion,
+  formatFileSize,
   regenerateMissingThumbnails,
   tagCategories,
 } from "./lib/library";
@@ -99,7 +103,10 @@ function App() {
   const [tagIds, setTagIds] = useState<number[]>([]);
   const [tags, setTags] = useState<TagWithCount[]>([]);
   const [version, setVersion] = useState(0);
+  const [isConverting, setIsConverting] = useState(false);
   const importingRef = useRef(false);
+  const convertingRef = useRef(false);
+  const closeAfterConvertRef = useRef(false);
   const canImportRef = useRef(false);
 
   useEffect(() => {
@@ -210,6 +217,63 @@ function App() {
     }
   }
 
+  const handleConvertingChange = useCallback((busy: boolean) => {
+    convertingRef.current = busy;
+    setIsConverting(busy);
+    if (!busy && closeAfterConvertRef.current) {
+      void getCurrentWindow().destroy();
+    }
+  }, []);
+
+  const handleConvertComplete = useCallback((filename: string, result: ConvertResult) => {
+    if (result.status === "converted") {
+      void notify(
+        "7z + AVIF への変換が完了しました",
+        `${filename}\n${formatFileSize(result.originalSize)} → ${formatFileSize(result.newSize)}`,
+      );
+    } else if (result.status === "failed") {
+      void notify("変換に失敗しました", `${filename}\n${result.message}`);
+    } else if (result.status === "notSmaller") {
+      void notify("変換を取りやめました", `${filename}\n変換後のほうが小さくならなかったため、元を残しました`);
+    }
+  }, []);
+
+  // 変換中にウィンドウを閉じる場合は、確認のうえ中断し、元のアーカイブを保ったまま終了する。
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) {
+      return;
+    }
+    let unlisten: (() => void) | undefined;
+    let isMounted = true;
+    getCurrentWindow()
+      .onCloseRequested(async (event) => {
+        if (!convertingRef.current) {
+          return;
+        }
+        event.preventDefault();
+        const confirmed = await ask(
+          "7z + AVIF への変換を中断して終了しますか？元のアーカイブはそのまま残ります。",
+          { title: "変換中です", kind: "warning" },
+        );
+        if (confirmed) {
+          closeAfterConvertRef.current = true;
+          await cancelConversion().catch(() => undefined);
+        }
+      })
+      .then((dispose) => {
+        if (isMounted) {
+          unlisten = dispose;
+        } else {
+          dispose();
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      isMounted = false;
+      unlisten?.();
+    };
+  }, []);
+
   const bumpVersion = useCallback(() => setVersion((current) => current + 1), []);
 
   useEffect(() => {
@@ -260,7 +324,7 @@ function App() {
     query.search !== null || tagIds.length > 0 || view === "favorites";
 
   const importPaths = useCallback(async (paths: string[]) => {
-    if (importingRef.current || paths.length === 0) {
+    if (importingRef.current || convertingRef.current || paths.length === 0) {
       return;
     }
     importingRef.current = true;
@@ -316,7 +380,9 @@ function App() {
       .onDragDropEvent((event) => {
         const payload = event.payload;
         if (payload.type === "enter" || payload.type === "over") {
-          setIsDragging(canImportRef.current && !importingRef.current);
+          setIsDragging(
+            canImportRef.current && !importingRef.current && !convertingRef.current,
+          );
         } else if (payload.type === "leave") {
           setIsDragging(false);
         } else if (payload.type === "drop") {
@@ -470,7 +536,7 @@ function App() {
           {repository && (
             <button
               className="mt-2 w-full rounded-lg border border-white/[0.08] px-3 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:cursor-wait disabled:opacity-50"
-              disabled={isBackingUp || isImporting}
+              disabled={isBackingUp || isImporting || isConverting}
               onClick={backupRepository}
               title="リポジトリ全体を、別PCへ移せる形でコピーします"
               type="button"
@@ -548,6 +614,8 @@ function App() {
           {repository ? (
             <LibraryView
               isFiltered={isFiltered}
+              onConvertComplete={handleConvertComplete}
+              onConvertingChange={handleConvertingChange}
               onCountChange={setArchiveCount}
               onError={setError}
               onMutated={bumpVersion}
@@ -581,7 +649,7 @@ function App() {
         <button
           aria-label={isImporting ? "インポート中" : "アーカイブをインポート"}
           className="fixed bottom-6 right-6 z-50 grid size-14 place-items-center rounded-full bg-violet-500 text-3xl leading-none text-white shadow-lg shadow-black/40 transition hover:bg-violet-400 disabled:cursor-wait disabled:opacity-60"
-          disabled={isImporting}
+          disabled={isImporting || isConverting}
           onClick={importArchives}
           title={isImporting ? "インポート中…" : "アーカイブをインポート（ウィンドウへのドロップも可）"}
           type="button"

@@ -11,6 +11,7 @@ import {
 } from "../../lib/library";
 import { ArchiveCard } from "./ArchiveCard";
 import { ArchiveDetail } from "./ArchiveDetail";
+import { ConvertDialog, ConvertResult } from "./ConvertDialog";
 
 type Props = {
   query: ArchiveQuery;
@@ -19,6 +20,8 @@ type Props = {
   onMutated: () => void;
   onError: (message: string | null) => void;
   onCountChange: (count: number | null) => void;
+  onConvertingChange: (busy: boolean) => void;
+  onConvertComplete: (filename: string, result: ConvertResult) => void;
 };
 
 export function LibraryView({
@@ -28,12 +31,15 @@ export function LibraryView({
   onMutated,
   onError,
   onCountChange,
+  onConvertingChange,
+  onConvertComplete,
 }: Props) {
   const [archives, setArchives] = useState<ArchiveSummary[] | null>(null);
   useEffect(() => {
     onCountChange(archives ? archives.length : null);
   }, [archives, onCountChange]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [converting, setConverting] = useState<ArchiveSummary | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -122,6 +128,7 @@ export function LibraryView({
             )
           }
           onClose={() => setSelectedId(null)}
+          onConvert={() => setConverting(selected)}
           onRemoveTag={(tagId) =>
             mutate(
               () => removeTag(selected.archiveId, tagId),
@@ -135,6 +142,18 @@ export function LibraryView({
             )
           }
           onToggleFavorite={() => void toggleFavorite(selected)}
+        />
+      )}
+      {converting && (
+        <ConvertDialog
+          archive={converting}
+          onBusyChange={onConvertingChange}
+          onClose={() => {
+            setConverting(null);
+            setSelectedId(null);
+            onMutated();
+          }}
+          onComplete={(result) => onConvertComplete(converting.filename, result)}
         />
       )}
     </>
