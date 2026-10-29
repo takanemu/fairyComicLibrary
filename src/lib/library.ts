@@ -18,16 +18,28 @@ export type ArchiveSummary = {
   pageCount: number | null;
   fileSize: number;
   importedAt: string;
+  lastReadAt: string | null;
+  readCount: number;
   isFavorite: boolean;
   hasThumbnail: boolean;
   tags: Tag[];
 };
 
+export type ArchiveSortBy =
+  | "fileSize"
+  | "importedAt"
+  | "lastReadAt"
+  | "readCount"
+  | "name";
+export type SortDirection = "asc" | "desc";
+
 export type ArchiveQuery = {
   search: string | null;
   favoritesOnly: boolean;
   tagIds: number[];
-  sort: "name" | "recent";
+  recentOnly: boolean;
+  sortBy: ArchiveSortBy;
+  sortDirection: SortDirection;
 };
 
 export const listArchives = (query: ArchiveQuery) =>

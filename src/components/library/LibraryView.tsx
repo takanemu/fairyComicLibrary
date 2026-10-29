@@ -77,6 +77,7 @@ export function LibraryView({
     try {
       await action();
       onError(null);
+      onMutated();
     } catch (reason) {
       onError(`${failure}: ${String(reason)}`);
     }
@@ -127,7 +128,7 @@ export function LibraryView({
               onOpen={() =>
                 mutateless(
                   () => openInViewer(archive.archiveId),
-                  "ビューアーを起動できませんでした",
+                  "ビューアー起動または読書履歴の更新に失敗しました",
                 )
               }
               onToggleFavorite={() => void toggleFavorite(archive)}

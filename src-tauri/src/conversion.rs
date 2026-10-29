@@ -90,6 +90,8 @@ struct Record {
     thumbnail_relative_path: Option<String>,
     is_favorite: i64,
     imported_at: String,
+    last_read_at: Option<String>,
+    read_count: i64,
 }
 
 struct PlanItem {
@@ -116,7 +118,7 @@ fn load_record(connection: &Connection, archive_id: &str) -> Result<Record, Stri
     connection
         .query_row(
             "SELECT original_filename, original_path, relative_path, format, page_count,
-                    thumbnail_relative_path, is_favorite, imported_at
+                    thumbnail_relative_path, is_favorite, imported_at, last_read_at, read_count
              FROM archives WHERE archive_id = ?1",
             [archive_id],
             |row| {
@@ -131,6 +133,8 @@ fn load_record(connection: &Connection, archive_id: &str) -> Result<Record, Stri
                     thumbnail_relative_path: row.get(5)?,
                     is_favorite: row.get(6)?,
                     imported_at: row.get(7)?,
+                    last_read_at: row.get(8)?,
+                    read_count: row.get(9)?,
                 })
             },
         )
@@ -713,8 +717,8 @@ fn register(
             "INSERT INTO archives (
                 archive_id, original_filename, original_path, relative_path, format,
                 file_size, thumbnail_relative_path, is_favorite, imported_at, converted_from,
-                page_count
-             ) VALUES (?1, ?2, ?3, ?4, '7z', ?5, ?6, ?7, ?8, ?9, ?10)",
+                page_count, last_read_at, read_count
+             ) VALUES (?1, ?2, ?3, ?4, '7z', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 new_id,
                 filename,
@@ -726,6 +730,8 @@ fn register(
                 record.imported_at,
                 old_id,
                 page_count,
+                record.last_read_at,
+                record.read_count,
             ],
         )?;
         transaction.execute(

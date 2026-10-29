@@ -178,7 +178,9 @@ pub fn open_in_viewer(archive_id: String, state: State<'_, AppState>) -> Result<
     std::thread::spawn(move || {
         let _ = child.wait();
     });
-    Ok(())
+    crate::library::record_read(&root, &archive_id).map_err(|error| {
+        format!("ビューアーは起動しましたが読書履歴を更新できませんでした: {error}")
+    })
 }
 
 #[tauri::command]

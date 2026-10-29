@@ -172,7 +172,10 @@ mod tests {
         let second = open(directory.path()).expect("reopen repository");
 
         assert_eq!(first.path, second.path);
-        assert_eq!(first.schema_version, 3);
+        assert_eq!(
+            first.schema_version,
+            crate::database::CURRENT_SCHEMA_VERSION
+        );
         assert_eq!(first.archive_count, 0);
         for relative_path in [
             "repository.json",

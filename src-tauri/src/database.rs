@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 pub fn initialize(path: &Path) -> Result<u64, String> {
     let connection = Connection::open(path)
@@ -125,6 +125,29 @@ pub fn initialize(path: &Path) -> Result<u64, String> {
         }
     }
 
+    let current = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+        .map_err(|error| format!("SQLiteスキーマバージョンを読み取れませんでした: {error}"))?;
+    if current < 4 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLiteスキーマの更新を開始できませんでした: {error}"))?;
+        transaction
+            .execute_batch(
+                "
+                ALTER TABLE archives ADD COLUMN last_read_at TEXT;
+                ALTER TABLE archives ADD COLUMN read_count INTEGER NOT NULL DEFAULT 0
+                    CHECK(read_count >= 0);
+                CREATE INDEX idx_archives_last_read_at ON archives(last_read_at);
+                PRAGMA user_version = 4;
+                ",
+            )
+            .map_err(|error| format!("SQLiteスキーマをv4へ更新できませんでした: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
+    }
+
     connection
         .query_row("SELECT COUNT(*) FROM archives", [], |row| {
             row.get::<_, u64>(0)
@@ -181,6 +204,63 @@ mod tests {
             )
             .expect("read persisted archive path");
         assert_eq!(relative_path, "archives/aa/sample.cbz");
+    }
+
+    #[test]
+    fn migrates_schema_v3_read_history_fields() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        let database_path = repository.path().join("library.sqlite3");
+        let connection = Connection::open(&database_path).expect("create v3 database");
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE archives (
+                    archive_id TEXT PRIMARY KEY CHECK(length(archive_id) = 64),
+                    original_filename TEXT NOT NULL,
+                    original_path TEXT,
+                    relative_path TEXT NOT NULL UNIQUE,
+                    format TEXT NOT NULL,
+                    file_size INTEGER NOT NULL CHECK(file_size >= 0),
+                    thumbnail_relative_path TEXT,
+                    is_favorite INTEGER NOT NULL DEFAULT 0 CHECK(is_favorite IN (0, 1)),
+                    imported_at TEXT NOT NULL,
+                    converted_from TEXT,
+                    page_count INTEGER CHECK(page_count >= 0)
+                );
+                CREATE TABLE tags (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    category TEXT NOT NULL CHECK(category IN ('author', 'series', 'classification')),
+                    UNIQUE(category, name)
+                );
+                CREATE TABLE archive_tags (
+                    archive_id TEXT NOT NULL REFERENCES archives(archive_id) ON DELETE CASCADE,
+                    tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                    PRIMARY KEY (archive_id, tag_id)
+                );
+                INSERT INTO archives (
+                    archive_id, original_filename, relative_path, format, file_size, imported_at
+                ) VALUES (
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'legacy.cbz', 'archives/aa/legacy.cbz', 'cbz', 42, '2026-10-24T00:00:00Z'
+                );
+                PRAGMA user_version = 3;
+                ",
+            )
+            .expect("create v3 schema");
+        drop(connection);
+
+        assert_eq!(initialize(&database_path).expect("migrate v3 database"), 1);
+        let connection = Connection::open(database_path).expect("open migrated database");
+        let (last_read_at, read_count): (Option<String>, i64) = connection
+            .query_row(
+                "SELECT last_read_at, read_count FROM archives WHERE original_filename = 'legacy.cbz'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read new fields");
+        assert_eq!(last_read_at, None);
+        assert_eq!(read_count, 0);
     }
 
     #[test]

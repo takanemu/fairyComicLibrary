@@ -14,6 +14,23 @@ pub struct TagSummary {
     pub category: String,
 }
 
+pub fn record_read(repository_root: &Path, archive_id: &str) -> Result<(), String> {
+    let connection = open(repository_root)?;
+    let changed = connection
+        .execute(
+            "UPDATE archives
+             SET last_read_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                 read_count = read_count + 1
+             WHERE archive_id = ?1 AND read_count < 9223372036854775807",
+            [archive_id],
+        )
+        .map_err(|error| format!("読書履歴を更新できませんでした: {error}"))?;
+    if changed == 0 {
+        return Err("対象のアーカイブが見つからないか、読書回数が上限に達しています。".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TagWithCount {
@@ -32,6 +49,8 @@ pub struct ArchiveSummary {
     pub page_count: Option<u64>,
     pub file_size: u64,
     pub imported_at: String,
+    pub last_read_at: Option<String>,
+    pub read_count: u64,
     pub is_favorite: bool,
     pub has_thumbnail: bool,
     pub tags: Vec<TagSummary>,
@@ -39,10 +58,21 @@ pub struct ArchiveSummary {
 
 #[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum SortOrder {
+pub enum SortBy {
+    FileSize,
     #[default]
+    ImportedAt,
+    LastReadAt,
+    ReadCount,
     Name,
-    Recent,
+}
+
+#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SortDirection {
+    Asc,
+    #[default]
+    Desc,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -51,7 +81,9 @@ pub struct ArchiveQuery {
     pub search: Option<String>,
     pub favorites_only: bool,
     pub tag_ids: Vec<i64>,
-    pub sort: SortOrder,
+    pub recent_only: bool,
+    pub sort_by: SortBy,
+    pub sort_direction: SortDirection,
 }
 
 fn open(repository_root: &Path) -> Result<Connection, String> {
@@ -90,13 +122,23 @@ pub fn list_archives(
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(escape_like);
-    let (order_by, limit) = match query.sort {
-        SortOrder::Name => (
-            "a.original_filename COLLATE NOCASE ASC, a.archive_id ASC",
-            -1,
-        ),
-        SortOrder::Recent => ("a.imported_at DESC, a.archive_id ASC", RECENT_LIMIT),
+    let sort_column = match query.sort_by {
+        SortBy::FileSize => "a.file_size",
+        SortBy::ImportedAt => "a.imported_at",
+        SortBy::LastReadAt => "a.last_read_at",
+        SortBy::ReadCount => "a.read_count",
+        SortBy::Name => "a.original_filename COLLATE NOCASE",
     };
+    let direction = match query.sort_direction {
+        SortDirection::Asc => "ASC",
+        SortDirection::Desc => "DESC",
+    };
+    let order_by = if query.sort_by == SortBy::LastReadAt {
+        format!("(a.last_read_at IS NULL) ASC, {sort_column} {direction}, a.archive_id ASC")
+    } else {
+        format!("{sort_column} {direction}, a.archive_id ASC")
+    };
+    let limit = if query.recent_only { RECENT_LIMIT } else { -1 };
 
     // 同じ分類内は OR、異なる分類の間は AND。数値のみを埋め込むためSQLインジェクションは起きない。
     let tag_filter = if query.tag_ids.is_empty() {
@@ -116,16 +158,23 @@ pub fn list_archives(
         )
     };
     let sql = format!(
-        "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
-                a.imported_at, a.is_favorite, a.thumbnail_relative_path IS NOT NULL
-         FROM archives a
-         WHERE (:favorites = 0 OR a.is_favorite = 1)
-           {tag_filter}
-           AND (:search IS NULL
-                OR a.original_filename LIKE :search ESCAPE '\\'
-                OR EXISTS (
-                    SELECT 1 FROM archive_tags x JOIN tags t ON t.id = x.tag_id
-                    WHERE x.archive_id = a.archive_id AND t.name LIKE :search ESCAPE '\\'))
+        "WITH matching AS (
+             SELECT a.* FROM archives a
+             WHERE (:favorites = 0 OR a.is_favorite = 1)
+               {tag_filter}
+               AND (:search IS NULL
+                    OR a.original_filename LIKE :search ESCAPE '\\'
+                    OR EXISTS (
+                        SELECT 1 FROM archive_tags x JOIN tags t ON t.id = x.tag_id
+                        WHERE x.archive_id = a.archive_id AND t.name LIKE :search ESCAPE '\\'))
+         )
+         SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
+                a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
+                a.thumbnail_relative_path IS NOT NULL
+         FROM matching a
+         WHERE (:recent_only = 0 OR a.archive_id IN (
+                SELECT archive_id FROM matching
+                ORDER BY imported_at DESC, archive_id ASC LIMIT {RECENT_LIMIT}))
          ORDER BY {order_by}
          LIMIT :limit"
     );
@@ -136,6 +185,7 @@ pub fn list_archives(
         .query_map(
             named_params! {
                 ":favorites": query.favorites_only as i64,
+                ":recent_only": query.recent_only as i64,
                 ":search": search,
                 ":limit": limit,
             },
@@ -149,8 +199,10 @@ pub fn list_archives(
                         .map(|count| count.max(0) as u64),
                     file_size: row.get::<_, i64>(4)?.max(0) as u64,
                     imported_at: row.get(5)?,
-                    is_favorite: row.get::<_, i64>(6)? != 0,
-                    has_thumbnail: row.get::<_, i64>(7)? != 0,
+                    last_read_at: row.get(6)?,
+                    read_count: row.get::<_, i64>(7)?.max(0) as u64,
+                    is_favorite: row.get::<_, i64>(8)? != 0,
+                    has_thumbnail: row.get::<_, i64>(9)? != 0,
                     tags: Vec::new(),
                 })
             },
@@ -384,7 +436,8 @@ pub fn remove_tag(repository_root: &Path, archive_id: &str, tag_id: i64) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        add_tag, list_archives, list_tags, remove_tag, set_favorite, ArchiveQuery, SortOrder,
+        add_tag, list_archives, list_tags, remove_tag, set_favorite, ArchiveQuery, SortBy,
+        SortDirection,
     };
     use crate::database;
     use rusqlite::{params, Connection};
@@ -396,10 +449,22 @@ mod tests {
         let database_path = repository.path().join("database/library.sqlite3");
         database::initialize(&database_path).expect("initialize database");
         let connection = Connection::open(database_path).expect("open database");
-        for (index, (name, imported_at)) in [
-            ("Alpha_100%.cbz", "2026-01-01T00:00:00Z"),
-            ("beta.zip", "2026-03-01T00:00:00Z"),
-            ("Gamma.7z", "2026-02-01T00:00:00Z"),
+        for (index, (name, imported_at, file_size, last_read_at, read_count)) in [
+            (
+                "Alpha_100%.cbz",
+                "2026-01-01T00:00:00Z",
+                100,
+                Some("2026-03-01T00:00:00Z"),
+                3,
+            ),
+            ("beta.zip", "2026-03-01T00:00:00Z", 300, None, 0),
+            (
+                "Gamma.7z",
+                "2026-02-01T00:00:00Z",
+                200,
+                Some("2026-02-01T00:00:00Z"),
+                7,
+            ),
         ]
         .into_iter()
         .enumerate()
@@ -408,14 +473,17 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO archives (archive_id, original_filename, relative_path, format,
-                        file_size, thumbnail_relative_path, imported_at)
-                     VALUES (?1, ?2, ?3, 'cbz', 10, ?4, ?5)",
+                        file_size, thumbnail_relative_path, imported_at, last_read_at, read_count)
+                     VALUES (?1, ?2, ?3, 'cbz', ?4, ?5, ?6, ?7, ?8)",
                     params![
                         id,
                         name,
                         format!("archives/{}/{name}", &id[..2]),
+                        file_size,
                         format!("thumbnails/{}/{id}.webp", &id[..2]),
-                        imported_at
+                        imported_at,
+                        last_read_at,
+                        read_count
                     ],
                 )
                 .expect("insert archive");
@@ -473,22 +541,89 @@ mod tests {
     }
 
     #[test]
-    fn lists_by_name_and_by_recently_imported() {
+    fn sorts_archives_by_selected_field_and_direction() {
         let repository = repository_with_archives();
         assert_eq!(
             names(repository.path(), &ArchiveQuery::default()),
-            ["Alpha_100%.cbz", "beta.zip", "Gamma.7z"]
+            ["beta.zip", "Gamma.7z", "Alpha_100%.cbz"]
+        );
+        let query = |sort_by, sort_direction| ArchiveQuery {
+            sort_by,
+            sort_direction,
+            ..Default::default()
+        };
+        assert_eq!(
+            names(
+                repository.path(),
+                &query(SortBy::FileSize, SortDirection::Asc)
+            ),
+            ["Alpha_100%.cbz", "Gamma.7z", "beta.zip"]
         );
         assert_eq!(
             names(
                 repository.path(),
-                &ArchiveQuery {
-                    sort: SortOrder::Recent,
-                    ..Default::default()
-                }
+                &query(SortBy::FileSize, SortDirection::Desc)
             ),
             ["beta.zip", "Gamma.7z", "Alpha_100%.cbz"]
         );
+        assert_eq!(
+            names(
+                repository.path(),
+                &query(SortBy::ImportedAt, SortDirection::Asc)
+            ),
+            ["Alpha_100%.cbz", "Gamma.7z", "beta.zip"]
+        );
+        assert_eq!(
+            names(
+                repository.path(),
+                &query(SortBy::LastReadAt, SortDirection::Desc)
+            ),
+            ["Alpha_100%.cbz", "Gamma.7z", "beta.zip"]
+        );
+        assert_eq!(
+            names(
+                repository.path(),
+                &query(SortBy::LastReadAt, SortDirection::Asc)
+            ),
+            ["Gamma.7z", "Alpha_100%.cbz", "beta.zip"]
+        );
+        assert_eq!(
+            names(
+                repository.path(),
+                &query(SortBy::ReadCount, SortDirection::Asc)
+            ),
+            ["beta.zip", "Alpha_100%.cbz", "Gamma.7z"]
+        );
+        assert_eq!(
+            names(
+                repository.path(),
+                &query(SortBy::ReadCount, SortDirection::Desc)
+            ),
+            ["Gamma.7z", "Alpha_100%.cbz", "beta.zip"]
+        );
+        assert_eq!(
+            names(repository.path(), &query(SortBy::Name, SortDirection::Desc)),
+            ["Gamma.7z", "beta.zip", "Alpha_100%.cbz"]
+        );
+    }
+
+    #[test]
+    fn records_successful_reads_for_sorting() {
+        let repository = repository_with_archives();
+        super::record_read(repository.path(), &id(1)).expect("record read");
+        let archive = list_archives(
+            repository.path(),
+            &ArchiveQuery {
+                sort_by: SortBy::LastReadAt,
+                ..Default::default()
+            },
+        )
+        .expect("list")
+        .into_iter()
+        .find(|archive| archive.archive_id == id(1))
+        .expect("read archive");
+        assert_eq!(archive.read_count, 1);
+        assert!(archive.last_read_at.is_some());
     }
 
     #[test]
@@ -543,7 +678,7 @@ mod tests {
         };
         assert_eq!(
             names(repository.path(), &filtered),
-            ["Alpha_100%.cbz", "beta.zip"]
+            ["beta.zip", "Alpha_100%.cbz"]
         );
 
         remove_tag(repository.path(), &id(0), tag.id).expect("remove from first");

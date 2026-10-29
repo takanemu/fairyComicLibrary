@@ -12,6 +12,8 @@ import { ConvertResult } from "./components/library/ConvertDialog";
 import { LibraryView } from "./components/library/LibraryView";
 import {
   ArchiveQuery,
+  ArchiveSortBy,
+  SortDirection,
   TagCategory,
   TagWithCount,
   listTags,
@@ -98,6 +100,8 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [view, setView] = useState<LibraryViewId>("all");
+  const [sortBy, setSortBy] = useState<ArchiveSortBy>("importedAt");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [searchText, setSearchText] = useState("");
   const [archiveCount, setArchiveCount] = useState<number | null>(null);
   const [search, setSearch] = useState("");
@@ -320,9 +324,11 @@ function App() {
       search: search.trim() || null,
       favoritesOnly: view === "favorites",
       tagIds,
-      sort: view === "recent" ? "recent" : "name",
+      recentOnly: view === "recent",
+      sortBy,
+      sortDirection,
     }),
-    [search, view, tagIds],
+    [search, sortBy, sortDirection, view, tagIds],
   );
   const isFiltered =
     query.search !== null || tagIds.length > 0 || view === "favorites";
@@ -593,19 +599,51 @@ function App() {
               <p className="text-xs text-slate-500">
                 {archiveCount !== null ? `${archiveCount} 件` : ""}
               </p>
-              <label className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.025] px-3 py-2 text-xs text-slate-300">
-                <span aria-hidden="true" className="text-slate-500">
-                  ⌕
-                </span>
-                <input
-                  aria-label="ファイル名・タグで検索"
-                  className="w-56 bg-transparent outline-none placeholder:text-slate-600"
-                  onChange={(event) => setSearchText(event.target.value)}
-                  placeholder="ファイル名・タグで検索"
-                  type="search"
-                  value={searchText}
-                />
-              </label>
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-slate-300" htmlFor="archive-sort-by">
+                  並び替え
+                </label>
+                <div className="relative">
+                  <select
+                    className="w-full appearance-none rounded-lg border border-white/[0.07] bg-slate-800 py-2 pl-3 pr-7 text-xs text-slate-100 outline-none transition focus:border-violet-300/50"
+                    id="archive-sort-by"
+                    onChange={(event) => setSortBy(event.target.value as ArchiveSortBy)}
+                    value={sortBy}
+                  >
+                    <option value="fileSize">ファイルサイズ</option>
+                    <option value="importedAt">登録日時</option>
+                    <option value="lastReadAt">最終読書日時</option>
+                    <option value="readCount">読書回数</option>
+                    <option value="name">ファイル名称</option>
+                  </select>
+                  <span aria-hidden="true" className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-slate-300">▾</span>
+                </div>
+                <div className="relative">
+                  <select
+                    aria-label="並び順"
+                    className="w-full appearance-none rounded-lg border border-white/[0.07] bg-slate-800 py-2 pl-3 pr-7 text-xs text-slate-100 outline-none transition focus:border-violet-300/50"
+                    onChange={(event) => setSortDirection(event.target.value as SortDirection)}
+                    value={sortDirection}
+                  >
+                    <option value="asc">昇順</option>
+                    <option value="desc">降順</option>
+                  </select>
+                  <span aria-hidden="true" className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-slate-300">▾</span>
+                </div>
+                <label className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.025] px-3 py-2 text-xs text-slate-300">
+                  <span aria-hidden="true" className="text-slate-500">
+                    ⌕
+                  </span>
+                  <input
+                    aria-label="ファイル名・タグで検索"
+                    className="w-56 bg-transparent outline-none placeholder:text-slate-600"
+                    onChange={(event) => setSearchText(event.target.value)}
+                    placeholder="ファイル名・タグで検索"
+                    type="search"
+                    value={searchText}
+                  />
+                </label>
+              </div>
             </div>
           )}
 
