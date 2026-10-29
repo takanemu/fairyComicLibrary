@@ -199,26 +199,31 @@ export function ArchiveDetail({
 
       <form className="mt-4 flex flex-col gap-2" onSubmit={submit}>
         <div className="flex gap-2">
-          <select
-            aria-label="タグの分類"
-            className="rounded-lg border border-slate-300 bg-white px-2 py-2 text-xs text-slate-900"
-            onChange={(event) => setCategory(event.target.value as TagCategory)}
-            value={category}
-          >
-            {tagCategories.map((item) => (
-              <option key={item.value} value={item.value}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-          <input
-            aria-label="タグ名"
-            className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 placeholder:text-slate-500"
-            maxLength={100}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="タグ名を入力"
-            value={name}
-          />
+          <div className="relative">
+            <select
+              aria-label="タグの分類"
+              className="w-full appearance-none rounded-lg border border-white/[0.07] bg-slate-800 py-2 pl-3 pr-7 text-xs text-slate-100 outline-none transition focus:border-violet-300/50"
+              onChange={(event) => setCategory(event.target.value as TagCategory)}
+              value={category}
+            >
+              {tagCategories.map((item) => (
+                <option key={item.value} value={item.value}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+            <span aria-hidden="true" className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-slate-300">▾</span>
+          </div>
+          <label className="flex min-w-0 flex-1 items-center rounded-lg border border-white/[0.07] bg-white/[0.025] px-3 py-2 text-xs text-slate-300">
+            <input
+              aria-label="タグ名"
+              className="w-full min-w-0 bg-transparent outline-none placeholder:text-slate-600"
+              maxLength={100}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="タグ名を入力"
+              value={name}
+            />
+          </label>
         </div>
         <button
           className="rounded-lg bg-violet-400/15 px-3 py-2 text-xs font-medium text-violet-200 transition hover:bg-violet-400/20 disabled:opacity-50"
