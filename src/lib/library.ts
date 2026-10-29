@@ -33,6 +33,44 @@ export type ArchiveSortBy =
   | "name";
 export type SortDirection = "asc" | "desc";
 
+const SORT_STORAGE_KEY = "fairyComicLibrary.sort";
+const sortFields: ArchiveSortBy[] = [
+  "fileSize",
+  "importedAt",
+  "lastReadAt",
+  "readCount",
+  "name",
+];
+
+export const defaultSort: { sortBy: ArchiveSortBy; sortDirection: SortDirection } = {
+  sortBy: "importedAt",
+  sortDirection: "desc",
+};
+
+export function loadSort(): typeof defaultSort {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SORT_STORAGE_KEY) ?? "null");
+    if (
+      saved &&
+      sortFields.includes(saved.sortBy) &&
+      (saved.sortDirection === "asc" || saved.sortDirection === "desc")
+    ) {
+      return { sortBy: saved.sortBy, sortDirection: saved.sortDirection };
+    }
+  } catch {
+    // 保存値が壊れていても既定の並びで起動する。
+  }
+  return defaultSort;
+}
+
+export function saveSort(sort: typeof defaultSort) {
+  try {
+    localStorage.setItem(SORT_STORAGE_KEY, JSON.stringify(sort));
+  } catch {
+    // 保存できなくても表示には影響させない。
+  }
+}
+
 export type ArchiveQuery = {
   search: string | null;
   favoritesOnly: boolean;

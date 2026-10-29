@@ -17,6 +17,8 @@ import {
   TagCategory,
   TagWithCount,
   listTags,
+  loadSort,
+  saveSort,
   cancelConversion,
   formatFileSize,
   regenerateMissingThumbnails,
@@ -100,8 +102,14 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [view, setView] = useState<LibraryViewId>("all");
-  const [sortBy, setSortBy] = useState<ArchiveSortBy>("importedAt");
-  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [initialSort] = useState(loadSort);
+  const [sortBy, setSortBy] = useState<ArchiveSortBy>(initialSort.sortBy);
+  const [sortDirection, setSortDirection] = useState<SortDirection>(
+    initialSort.sortDirection,
+  );
+  useEffect(() => {
+    saveSort({ sortBy, sortDirection });
+  }, [sortBy, sortDirection]);
   const [searchText, setSearchText] = useState("");
   const [archiveCount, setArchiveCount] = useState<number | null>(null);
   const [search, setSearch] = useState("");
