@@ -116,6 +116,18 @@ export function ArchiveDetail({
             {new Date(archive.importedAt).toLocaleString("ja-JP")}
           </dd>
         </div>
+        <div className="flex justify-between">
+          <dt>最終読書日時</dt>
+          <dd className="text-slate-300">
+            {archive.lastReadAt
+              ? new Date(archive.lastReadAt).toLocaleString("ja-JP")
+              : "未読"}
+          </dd>
+        </div>
+        <div className="flex justify-between">
+          <dt>読書回数</dt>
+          <dd className="text-slate-300">{archive.readCount} 回</dd>
+        </div>
       </dl>
 
       <button
