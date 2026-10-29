@@ -8,6 +8,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import importButtonIcon from "./assets/book-import.png";
 import { ConvertResult } from "./components/library/ConvertDialog";
 import { LibraryView } from "./components/library/LibraryView";
 import {
@@ -725,15 +726,18 @@ function App() {
       {repository && (
         <button
           aria-label={isImporting ? "インポート中" : "アーカイブをインポート"}
-          className="fixed bottom-6 right-6 z-50 grid size-14 place-items-center rounded-full bg-violet-500 text-3xl leading-none text-white shadow-lg shadow-black/40 transition hover:bg-violet-400 disabled:cursor-wait disabled:opacity-60"
+          className="fixed bottom-6 right-6 z-50 size-14 rounded-2xl transition duration-200 drop-shadow-[0_10px_8px_rgba(0,0,0,0.45)] hover:-translate-y-0.5 hover:drop-shadow-[0_14px_10px_rgba(0,0,0,0.5)] active:translate-y-0 active:drop-shadow-[0_4px_4px_rgba(0,0,0,0.45)] disabled:cursor-wait disabled:opacity-60 disabled:hover:translate-y-0"
           disabled={isImporting || isConverting}
           onClick={importArchives}
           title={isImporting ? "インポート中…" : "アーカイブをインポート（ウィンドウへのドロップも可）"}
           type="button"
         >
-          <span aria-hidden="true" className={isImporting ? "animate-pulse text-xl" : ""}>
-            {isImporting ? "…" : "+"}
-          </span>
+          <img
+            alt=""
+            className={`size-full ${isImporting ? "animate-pulse" : ""}`}
+            draggable={false}
+            src={importButtonIcon}
+          />
         </button>
       )}
     </div>
