@@ -517,7 +517,7 @@ fn is_supported_image(name: &str) -> bool {
             .and_then(|extension| extension.to_str())
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp")
+        Some("jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "avif")
     )
 }
 
@@ -708,6 +708,31 @@ mod tests {
         let image = image::open(output_path).expect("decode WebP");
         assert_eq!(image.width(), THUMBNAIL_MAX_WIDTH);
         assert!(image.height() <= THUMBNAIL_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn lists_and_decodes_avif_covers() {
+        let image = RgbImage::from_pixel(64, 96, image::Rgb([30, 160, 90]));
+        let mut avif = Vec::new();
+        image::codecs::avif::AvifEncoder::new_with_speed_quality(&mut avif, 10, 60)
+            .write_image(image.as_raw(), 64, 96, image::ExtendedColorType::Rgb8)
+            .expect("encode avif");
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let archive_path = directory.path().join("comic.cbz");
+        write_zip(
+            &archive_path,
+            &[("001.webp", &png_bytes(10, 10)), ("002.avif", &avif)],
+        );
+
+        assert_eq!(
+            super::list_images(&archive_path, "cbz").expect("list"),
+            ["001.webp", "002.avif"]
+        );
+        let output = directory.path().join("avif.webp");
+        super::create_thumbnail_from_entry(&archive_path, "cbz", "002.avif", &output)
+            .expect("thumbnail from avif");
+        validate_existing_thumbnail(&output).expect("valid WebP");
     }
 
     #[test]

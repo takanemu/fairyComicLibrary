@@ -96,6 +96,12 @@ export function ArchiveDetail({
         {archive.filename}
       </p>
       <dl className="mt-3 space-y-1 text-xs text-slate-500">
+        <div className="flex flex-col gap-1">
+          <dt>ハッシュ値 (SHA-256)</dt>
+          <dd className="break-all font-mono text-[10px] leading-4 text-slate-300">
+            {archive.archiveId}
+          </dd>
+        </div>
         <div className="flex justify-between">
           <dt>形式</dt>
           <dd className="uppercase text-slate-300">{archive.format}</dd>
