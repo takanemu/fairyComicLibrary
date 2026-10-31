@@ -11,7 +11,9 @@ permissions:
 jobs:
   release:
     name: Build and publish AppImage
-    runs-on: ubuntu-24.04
+    # 同梱ビューアは Ubuntu 26.04 でビルドされており、linuxdeploy が依存ライブラリ
+    # (libicu78 等) を解決できるよう、同じ世代のランナーを使う
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Check out source
