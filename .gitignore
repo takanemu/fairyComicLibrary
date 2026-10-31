@@ -5,6 +5,7 @@ src-tauri/target/
 
 # Generated Tauri schemas
 src-tauri/gen/
+src-tauri/binaries/
 
 # Local environment and editor state
 .env
