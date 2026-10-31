@@ -57,6 +57,7 @@ jobs:
         run: npm run build:release
         env:
           # linuxdeploy 同梱の strip は新しい ELF (.relr.dyn) を扱えず失敗する
+          TAURI_BUILD_VERBOSE: "1"
           NO_STRIP: "true"
           # FUSE なしの CI でも linuxdeploy を実行できるようにする
           APPIMAGE_EXTRACT_AND_RUN: "1"

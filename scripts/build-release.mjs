@@ -85,7 +85,11 @@ async function downloadAsset(asset, expectedDigest) {
 
 function buildRelease() {
   return new Promise((resolve, reject) => {
-    const child = spawn("npm", ["run", "tauri", "--", "build"], {
+    const args = ["run", "tauri", "--", "build"];
+    if (process.env.TAURI_BUILD_VERBOSE) {
+      args.push("--verbose");
+    }
+    const child = spawn("npm", args, {
       cwd: projectDirectory,
       stdio: "inherit",
     });
