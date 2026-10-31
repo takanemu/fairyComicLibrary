@@ -53,6 +53,10 @@ npm run build:release
 
 生成物は `src-tauri/target/release/bundle/appimage/` に出力されます。
 
+## GitHub Actions
+
+`v*` 形式のタグを push すると、GitHub Actions が Ubuntu 24.04 上でビューアーを取得・検証し、AppImage をビルドして GitHub Release に公開します。リリース前に、アプリのバージョンを更新して対応するタグを作成してください。
+
 ## アプリ管理リポジトリ
 
 選択したディレクトリに、アーカイブ・サムネイル・SQLite データベースをまとめて保存します。バックアップもリポジトリ全体を対象とするため、別の PC ではコピー先を「場所を変更」から選び直して利用できます。
