@@ -53,6 +53,11 @@ jobs:
 
       - name: Build AppImage
         run: npm run build:release
+        env:
+          # linuxdeploy 同梱の strip は新しい ELF (.relr.dyn) を扱えず失敗する
+          NO_STRIP: "true"
+          # FUSE なしの CI でも linuxdeploy を実行できるようにする
+          APPIMAGE_EXTRACT_AND_RUN: "1"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
