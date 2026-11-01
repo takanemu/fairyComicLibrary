@@ -9,9 +9,29 @@ type Props = {
   onToggleFavorite: () => void;
 };
 
+function filenameWithoutTags(filename: string) {
+  const trimmedFilename = filename.trimStart();
+  if (!trimmedFilename.startsWith("(")) return filename;
+
+  const classificationEnd = trimmedFilename.indexOf(")");
+  if (classificationEnd < 0) return filename;
+  const classification = trimmedFilename.slice(1, classificationEnd).trim();
+  const afterClassification = trimmedFilename.slice(classificationEnd + 1).trimStart();
+  if (!afterClassification.startsWith("[")) return filename;
+
+  const authorEnd = afterClassification.indexOf("]");
+  if (authorEnd < 0) return filename;
+  const author = afterClassification.slice(1, authorEnd).trim();
+  const isValidTag = (tag: string) => tag.length > 0 && Array.from(tag).length <= 100;
+  if (!isValidTag(classification) || !isValidTag(author)) return filename;
+
+  return afterClassification.slice(authorEnd + 1).trimStart();
+}
+
 export function ArchiveCard({ archive, selected, onSelect, onOpen, onToggleFavorite }: Props) {
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const url = thumbnailUrl(archive.archiveId);
+  const displayFilename = filenameWithoutTags(archive.filename);
   const clickTimer = useRef<number | null>(null);
 
   const cancelPendingSelect = () => {
@@ -69,7 +89,7 @@ export function ArchiveCard({ archive, selected, onSelect, onOpen, onToggleFavor
         </div>
         <div className="px-3 py-2.5">
           <p className="line-clamp-2 break-all text-xs font-medium leading-5 text-slate-200">
-            {archive.filename}
+            {displayFilename}
           </p>
           <p className="mt-1 text-[10px] uppercase tracking-wide text-slate-500">
             {archive.pageCount === null ? "ページ数不明" : `${archive.pageCount} ページ`}
