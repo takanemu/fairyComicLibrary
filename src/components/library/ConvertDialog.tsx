@@ -12,9 +12,9 @@ import {
 export type ConvertResult = ConvertOutcome | { status: "failed"; message: string };
 
 type Props = {
-  archive: ArchiveSummary;
+  archives: ArchiveSummary[];
   onBusyChange: (busy: boolean) => void;
-  onComplete: (result: ConvertResult) => void;
+  onComplete: (archive: ArchiveSummary, result: ConvertResult) => void;
   onClose: () => void;
 };
 
@@ -36,11 +36,29 @@ function formatDuration(seconds: number) {
     : `${total}秒`;
 }
 
-export function ConvertDialog({ archive, onBusyChange, onComplete, onClose }: Props) {
+function resultLabel(result: ConvertResult) {
+  switch (result.status) {
+    case "converted":
+      return `完了 ${formatFileSize(result.originalSize)} → ${formatFileSize(result.newSize)}`;
+    case "duplicate":
+      return "重複のため元を維持";
+    case "notSmaller":
+      return "サイズが小さくならないため元を維持";
+    case "cancelled":
+      return "中断";
+    case "failed":
+      return `失敗: ${result.message}`;
+  }
+}
+
+export function ConvertDialog({ archives, onBusyChange, onComplete, onClose }: Props) {
   const [stage, setStage] = useState<"confirm" | "running" | "done">("confirm");
+  const [speed, setSpeed] = useState(6);
+  const [currentIndex, setCurrentIndex] = useState(0);
   const [progress, setProgress] = useState<ConvertProgress | null>(null);
-  const [result, setResult] = useState<ConvertResult | null>(null);
+  const [results, setResults] = useState<Array<{ archive: ArchiveSummary; result: ConvertResult }>>([]);
   const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const convertStartedAt = useRef<number | null>(null);
   const startedAt = useRef(0);
@@ -60,7 +78,7 @@ export function ConvertDialog({ archive, onBusyChange, onComplete, onClose }: Pr
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.stopPropagation();
-        if (stage === "confirm") {
+        if (stage === "confirm" || stage === "done") {
           onClose();
         }
       }
@@ -74,28 +92,47 @@ export function ConvertDialog({ archive, onBusyChange, onComplete, onClose }: Pr
     setElapsed(0);
     setStage("running");
     onBusyChange(true);
-    let finished: ConvertResult;
-    try {
-      finished = await convertArchive(archive.archiveId, (update) => {
-        if (update.phase === "convert" && convertStartedAt.current === null) {
-          convertStartedAt.current = Date.now();
-        }
-        setProgress(update);
-      });
-    } catch (reason) {
-      finished = { status: "failed", message: String(reason) };
+
+    const completed: Array<{ archive: ArchiveSummary; result: ConvertResult }> = [];
+    for (const [index, archive] of archives.entries()) {
+      setCurrentIndex(index);
+      setProgress(null);
+      convertStartedAt.current = null;
+      let result: ConvertResult;
+      try {
+        result = await convertArchive(archive.archiveId, speed, (update) => {
+          if (update.phase === "convert" && convertStartedAt.current === null) {
+            convertStartedAt.current = Date.now();
+          }
+          setProgress(update);
+        });
+      } catch (reason) {
+        result = { status: "failed", message: String(reason) };
+      }
+      completed.push({ archive, result });
+      setResults([...completed]);
+      onComplete(archive, result);
+      if (result.status === "cancelled") {
+        break;
+      }
     }
-    setResult(finished);
+
     setStage("done");
     onBusyChange(false);
-    onComplete(finished);
   }
 
   async function cancel() {
     setCancelling(true);
-    await cancelConversion().catch(() => undefined);
+    setCancelError(null);
+    try {
+      await cancelConversion();
+    } catch (reason) {
+      setCancelling(false);
+      setCancelError(`中断を要求できませんでした: ${String(reason)}`);
+    }
   }
 
+  const currentArchive = archives[currentIndex];
   const ratio =
     progress && progress.totalBytes > 0 ? progress.doneBytes / progress.totalBytes : 0;
   const convertElapsed =
@@ -104,6 +141,11 @@ export function ConvertDialog({ archive, onBusyChange, onComplete, onClose }: Pr
     progress?.phase === "convert" && ratio >= 0.03 && convertElapsed >= 3
       ? (convertElapsed * (1 - ratio)) / ratio
       : null;
+  const convertedCount = results.filter(({ result }) => result.status === "converted").length;
+  const failedCount = results.filter(
+    ({ result }) => result.status === "failed" || result.status === "notSmaller",
+  ).length;
+  const skippedCount = archives.length - results.length;
 
   return (
     <div
@@ -114,22 +156,48 @@ export function ConvertDialog({ archive, onBusyChange, onComplete, onClose }: Pr
     >
       <div className="w-full max-w-md rounded-2xl border border-white/[0.08] bg-[#15171d] p-6 shadow-2xl">
         <h2 className="text-sm font-semibold text-slate-100">7z + AVIF へ変換</h2>
-        <p className="mt-1 truncate text-xs text-slate-500" title={archive.filename}>
-          {archive.filename}
-        </p>
 
         {stage === "confirm" && (
           <>
-            <ul className="mt-4 list-disc space-y-1.5 pl-5 text-xs leading-5 text-slate-300">
-              <li>PNG/JPEGをAVIF（品質70）へ変換し、7zで再アーカイブします。</li>
+            <p className="mt-1 text-xs text-slate-500">{archives.length} 件を順番に変換します。</p>
+            <ul className="mt-3 max-h-28 space-y-1 overflow-y-auto rounded-lg border border-white/[0.06] bg-white/[0.02] p-2">
+              {archives.map((archive) => (
+                <li className="truncate text-xs text-slate-300" key={archive.archiveId} title={archive.filename}>
+                  {archive.filename}
+                </li>
+              ))}
+            </ul>
+            <label className="mt-4 flex items-center justify-between gap-3 text-xs text-slate-300">
+              <span>AVIFエンコード速度</span>
+              <div className="relative">
+                <select
+                  aria-label="AVIFエンコード速度"
+                  className="w-full appearance-none rounded-lg border border-white/[0.07] bg-slate-800 py-2 pl-3 pr-7 text-xs text-slate-100 outline-none transition focus:border-violet-300/50"
+                  onChange={(event) => setSpeed(Number(event.target.value))}
+                  value={speed}
+                >
+                  {Array.from({ length: 10 }, (_, index) => index + 1).map((value) => (
+                    <option key={value} value={value}>
+                      {value}{value === 6 ? "（標準）" : ""}
+                    </option>
+                  ))}
+                </select>
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-slate-300"
+                >
+                  ▾
+                </span>
+              </div>
+            </label>
+            <p className="mt-1 text-[11px] leading-5 text-slate-500">
+              1は低速・高圧縮、10は高速・ファイルサイズ大きめです。品質は70固定です。
+            </p>
+            <ul className="mt-3 list-disc space-y-1.5 pl-5 text-xs leading-5 text-slate-300">
+              <li>PNG/JPEGをAVIFへ変換し、7zで再アーカイブします。</li>
               <li>画質は非可逆です。JPEGは再圧縮により二重に劣化します。</li>
-              <li>
-                内容が変わるため別のアーカイブとして登録し直します。お気に入りとタグは引き継ぎます。
-              </li>
-              <li className="text-amber-200">
-                変換に成功すると、元のアーカイブ（{formatFileSize(archive.fileSize)}）は削除されます。
-              </li>
-              <li>枚数が多いと時間がかかります。変換中は他の操作ができません。</li>
+              <li>変換成功時は元アーカイブを削除し、お気に入りとタグを引き継ぎます。</li>
+              <li>変換中は他の操作ができません。中断すると残りの変換も行いません。</li>
             </ul>
             <div className="mt-6 flex justify-end gap-2">
               <button
@@ -144,14 +212,17 @@ export function ConvertDialog({ archive, onBusyChange, onComplete, onClose }: Pr
                 onClick={() => void start()}
                 type="button"
               >
-                変換を開始
+                {archives.length} 件の変換を開始
               </button>
             </div>
           </>
         )}
 
-        {stage === "running" && (
+        {stage === "running" && currentArchive && (
           <>
+            <p className="mt-1 truncate text-xs text-slate-500" title={currentArchive.filename}>
+              {currentIndex + 1} / {archives.length} 件: {currentArchive.filename}
+            </p>
             <ol className="mt-4 flex gap-1" aria-label="工程">
               {phaseOrder.map((phase) => {
                 const current = progress ? phaseOrder.indexOf(progress.phase) : 0;
@@ -193,6 +264,7 @@ export function ConvertDialog({ archive, onBusyChange, onComplete, onClose }: Pr
             <p className="mt-2 h-4 truncate text-[11px] text-slate-500">
               {progress?.currentName ?? ""}
             </p>
+            {cancelError && <p className="mt-2 text-xs text-rose-300">{cancelError}</p>}
             <div className="mt-5 flex justify-end">
               <button
                 className="rounded-lg border border-white/[0.08] px-4 py-2 text-xs text-slate-300 hover:bg-white/[0.05] disabled:opacity-40"
@@ -206,40 +278,37 @@ export function ConvertDialog({ archive, onBusyChange, onComplete, onClose }: Pr
           </>
         )}
 
-        {stage === "done" && result && (
+        {stage === "done" && (
           <>
-            <div className="mt-4 space-y-1.5 text-xs leading-5 text-slate-300">
-              {result.status === "converted" && (
-                <>
-                  <p className="font-medium text-emerald-300">変換が完了しました。</p>
-                  <p>
-                    {formatFileSize(result.originalSize)} → {formatFileSize(result.newSize)}（
-                    {Math.round((1 - result.newSize / result.originalSize) * 100)}% 削減）
+            <p className="mt-2 text-xs text-slate-300">
+              {results.length} / {archives.length} 件を処理しました。変換成功 {convertedCount} 件
+              {failedCount > 0 ? `、失敗・サイズ不変 ${failedCount} 件` : ""}
+              {skippedCount > 0 ? `、未処理 ${skippedCount} 件` : ""}。
+            </p>
+            <ul className="mt-3 max-h-64 space-y-2 overflow-y-auto rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 text-xs">
+              {results.map(({ archive, result }) => (
+                <li key={archive.archiveId}>
+                  <p className="truncate text-slate-300" title={archive.filename}>
+                    {archive.filename}
                   </p>
-                  <p>
-                    AVIFへ変換: {result.convertedImages} 枚 / そのまま: {result.unchangedEntries} 件
+                  <p
+                    className={`mt-0.5 break-words ${
+                      result.status === "converted" ? "text-emerald-300" : "text-amber-200"
+                    }`}
+                  >
+                    {resultLabel(result)}
                   </p>
-                  {result.warning && <p className="text-amber-200">{result.warning}</p>}
-                </>
-              )}
-              {result.status === "duplicate" && (
-                <p>同じ内容のアーカイブが既に登録されているため、元のアーカイブを残しました。</p>
-              )}
-              {result.status === "notSmaller" && (
-                <p>
-                  変換後（{formatFileSize(result.newSize)}）が元（
-                  {formatFileSize(result.originalSize)}）より小さくならなかったため、元のアーカイブを残しました。
-                </p>
-              )}
-              {result.status === "cancelled" && (
-                <p>変換を中断しました。元のアーカイブはそのまま残っています。</p>
-              )}
-              {result.status === "failed" && (
-                <p className="break-all text-rose-300">
-                  変換できませんでした（元のアーカイブは残っています）: {result.message}
-                </p>
-              )}
-            </div>
+                  {result.status === "converted" && result.warning && (
+                    <p className="mt-0.5 text-amber-200">{result.warning}</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+            {skippedCount > 0 && (
+              <p className="mt-2 text-[11px] text-slate-500">
+                中断後の作品は元のアーカイブのままです。
+              </p>
+            )}
             <div className="mt-6 flex justify-end">
               <button
                 className="rounded-lg bg-violet-500 px-4 py-2 text-xs font-medium text-white hover:bg-violet-400"

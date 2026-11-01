@@ -22,7 +22,6 @@ const MAX_IMAGE_WIDTH: u32 = 20_000;
 const MAX_IMAGE_HEIGHT: u32 = 30_000;
 const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 const AVIF_QUALITY: u8 = 70;
-const AVIF_SPEED: u8 = 6;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Serialize)]
@@ -249,14 +248,14 @@ fn decode_with_orientation(bytes: &[u8]) -> Result<DynamicImage, String> {
 }
 
 // 変換できない画像（アニメーション・破損・上限超過）は None を返し、そのままコピーする。
-fn encode_avif(bytes: &[u8]) -> Option<Vec<u8>> {
+fn encode_avif(bytes: &[u8], speed: u8) -> Option<Vec<u8>> {
     if is_animated_png(bytes) {
         return None;
     }
     let image = decode_with_orientation(bytes).ok()?;
     let (width, height) = (image.width(), image.height());
     let mut output = Vec::new();
-    let encoder = AvifEncoder::new_with_speed_quality(&mut output, AVIF_SPEED, AVIF_QUALITY);
+    let encoder = AvifEncoder::new_with_speed_quality(&mut output, speed, AVIF_QUALITY);
     let written = if image.color().has_alpha() {
         let rgba = image.to_rgba8();
         encoder.write_image(rgba.as_raw(), width, height, ExtendedColorType::Rgba8)
@@ -352,9 +351,13 @@ fn verify_output(path: &Path, expected: &[Expected]) -> Result<(), String> {
 pub fn convert_archive(
     root: &Path,
     archive_id: &str,
+    avif_speed: u8,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(ConvertProgress),
 ) -> Result<ConvertOutcome, String> {
+    if !(1..=10).contains(&avif_speed) {
+        return Err("AVIF速度は1〜10で指定してください。".to_string());
+    }
     let connection = Connection::open(root.join(DATABASE))
         .map_err(|error| format!("SQLiteデータベースを開けませんでした: {error}"))?;
     let record = load_record(&connection, archive_id)?;
@@ -391,6 +394,7 @@ pub fn convert_archive(
         extension,
         &source_path,
         &staging,
+        avif_speed,
         cancel,
         &mut reporter,
     );
@@ -409,6 +413,7 @@ fn run_conversion(
     extension: &str,
     source_path: &Path,
     staging: &Path,
+    avif_speed: u8,
     cancel: &AtomicBool,
     reporter: &mut Reporter,
 ) -> Result<ConvertOutcome, String> {
@@ -464,7 +469,7 @@ fn run_conversion(
                 .map_err(|error| {
                     format!("ZIP内の画像を展開できませんでした ({}): {error}", item.name)
                 })?;
-            match encode_avif(&bytes).filter(|avif| avif.len() < bytes.len()) {
+            match encode_avif(&bytes, avif_speed).filter(|avif| avif.len() < bytes.len()) {
                 Some(avif) => {
                     let written = writer
                         .push_archive_entry(new_entry(avif_name), Some(Cursor::new(&avif)))
@@ -843,7 +848,7 @@ mod tests {
         ]);
         let cancel = AtomicBool::new(false);
         let mut phases = Vec::new();
-        let outcome = convert_archive(root.path(), &old_id, &cancel, &mut |progress| {
+        let outcome = convert_archive(root.path(), &old_id, 6, &cancel, &mut |progress| {
             phases.push(progress.phase)
         })
         .expect("convert");
@@ -942,13 +947,27 @@ mod tests {
     fn cancellation_keeps_the_original() {
         let (root, id) = setup(&[("a.png", png_bytes(100, 100))]);
         let cancel = AtomicBool::new(true);
-        let outcome = convert_archive(root.path(), &id, &cancel, &mut |_| {}).expect("convert");
+        let outcome = convert_archive(root.path(), &id, 6, &cancel, &mut |_| {}).expect("convert");
         assert_eq!(outcome, ConvertOutcome::Cancelled);
         assert!(root.path().join("archives/ab/sample.cbz").is_file());
         assert!(!root
             .path()
             .join(format!("archives/.staging/{id}.convert.part"))
             .exists());
+    }
+
+    #[test]
+    fn rejects_avif_speed_outside_supported_range() {
+        let cancel = AtomicBool::new(false);
+        let error = convert_archive(
+            Path::new("missing-repository"),
+            "id",
+            0,
+            &cancel,
+            &mut |_| {},
+        )
+        .expect_err("invalid speed should be rejected");
+        assert_eq!(error, "AVIF速度は1〜10で指定してください。");
     }
 
     #[test]

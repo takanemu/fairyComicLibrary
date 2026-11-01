@@ -127,7 +127,6 @@ export function LibraryView({
   };
 
   const selected = archives?.filter((archive) => selectedIds.includes(archive.archiveId)) ?? [];
-  const converting = convertingQueue[0] ?? null;
 
   const runBulk = async (
     targets: ArchiveSummary[],
@@ -225,9 +224,8 @@ export function LibraryView({
   };
 
   const closeConversion = () => {
-    const hasNext = convertingQueue.length > 1;
-    setConvertingQueue((current) => current.slice(1));
-    if (!hasNext) onMutated();
+    setConvertingQueue([]);
+    onMutated();
   };
 
   if (archives === null) {
@@ -314,13 +312,14 @@ export function LibraryView({
           onUnmanage={() => void unmanageSelection()}
         />
       )}
-      {converting && (
+      {convertingQueue.length > 0 && (
         <ConvertDialog
-          archive={converting}
-          key={converting.archiveId}
+          archives={convertingQueue}
           onBusyChange={onConvertingChange}
           onClose={closeConversion}
-          onComplete={(result) => onConvertComplete(converting.filename, result)}
+          onComplete={(archive, result) =>
+            onConvertComplete(archive.filename, result)
+          }
         />
       )}
     </>

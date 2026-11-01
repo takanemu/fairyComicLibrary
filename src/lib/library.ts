@@ -183,11 +183,16 @@ export type ConvertOutcome =
 
 export const convertArchive = (
   archiveId: string,
+  avifSpeed: number,
   onProgress: (progress: ConvertProgress) => void,
 ) => {
   const channel = new Channel<ConvertProgress>();
   channel.onmessage = onProgress;
-  return invoke<ConvertOutcome>("convert_archive", { archiveId, onProgress: channel });
+  return invoke<ConvertOutcome>("convert_archive", {
+    archiveId,
+    avifSpeed,
+    onProgress: channel,
+  });
 };
 
 export const cancelConversion = () => invoke<void>("cancel_conversion");
