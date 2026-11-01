@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArchiveQuery,
   ArchiveSummary,
@@ -8,11 +8,13 @@ import {
   openInViewer,
   removeTag,
   regenerateThumbnail,
+  isConvertible,
   setFavorite,
 } from "../../lib/library";
 import { ArchiveCard } from "./ArchiveCard";
 import { ArchiveDetail } from "./ArchiveDetail";
 import { ConvertDialog, ConvertResult } from "./ConvertDialog";
+import { SelectionDetail } from "./SelectionDetail";
 
 type Props = {
   query: ArchiveQuery;
@@ -39,8 +41,10 @@ export function LibraryView({
   useEffect(() => {
     onCountChange(archives ? archives.length : null);
   }, [archives, onCountChange]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [converting, setConverting] = useState<ArchiveSummary | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [convertingQueue, setConvertingQueue] = useState<ArchiveSummary[]>([]);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const selectionAnchor = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -48,6 +52,8 @@ export function LibraryView({
       .then((result) => {
         if (!cancelled) {
           setArchives(result);
+          const visibleIds = new Set(result.map((archive) => archive.archiveId));
+          setSelectedIds((current) => current.filter((id) => visibleIds.has(id)));
         }
       })
       .catch((reason: unknown) => {
@@ -89,7 +95,104 @@ export function LibraryView({
       "お気に入りを更新できませんでした",
     );
 
-  const selected = archives?.find((archive) => archive.archiveId === selectedId);
+  const selectArchive = (archiveId: string, additive: boolean, range: boolean) => {
+    if (bulkBusy) return;
+    if (range && archives) {
+      const anchorIndex = archives.findIndex(
+        (archive) => archive.archiveId === selectionAnchor.current,
+      );
+      const targetIndex = archives.findIndex((archive) => archive.archiveId === archiveId);
+      if (anchorIndex >= 0 && targetIndex >= 0) {
+        const [start, end] = [anchorIndex, targetIndex].sort((a, b) => a - b);
+        const rangeIds = archives
+          .slice(start, end + 1)
+          .map((archive) => archive.archiveId);
+        setSelectedIds((current) => [...new Set([...current, ...rangeIds])]);
+        return;
+      }
+    }
+
+    if (additive) {
+      setSelectedIds((current) =>
+        current.includes(archiveId)
+          ? current.filter((id) => id !== archiveId)
+          : [...current, archiveId],
+      );
+    } else {
+      setSelectedIds([archiveId]);
+    }
+    selectionAnchor.current = archiveId;
+  };
+
+  const selected = archives?.filter((archive) => selectedIds.includes(archive.archiveId)) ?? [];
+  const converting = convertingQueue[0] ?? null;
+
+  const runBulk = async (
+    targets: ArchiveSummary[],
+    action: (archive: ArchiveSummary) => Promise<unknown>,
+    failure: string,
+  ): Promise<boolean> => {
+    setBulkBusy(true);
+    let succeeded = 0;
+    let firstFailure: string | null = null;
+    try {
+      for (const archive of targets) {
+        try {
+          await action(archive);
+          succeeded += 1;
+        } catch (reason) {
+          firstFailure ??= `${archive.filename}: ${String(reason)}`;
+        }
+      }
+      if (succeeded > 0) onMutated();
+      onError(
+        firstFailure
+          ? `${failure}（${succeeded}/${targets.length}件成功）: ${firstFailure}`
+          : null,
+      );
+      return firstFailure === null;
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  const addTagToSelection = async (category: TagCategory, name: string) => {
+    return runBulk(
+      selected,
+      (archive) => addTag(archive.archiveId, category, name),
+      "選択作品へのタグ追加に失敗しました",
+    );
+  };
+
+  const removeTagFromSelection = (tagId: number) => {
+    const targets = selected.filter((archive) =>
+      archive.tags.some((tag) => tag.id === tagId),
+    );
+    void runBulk(
+      targets,
+      (archive) => removeTag(archive.archiveId, tagId),
+      "選択作品からタグを外せませんでした",
+    );
+  };
+
+  const toggleFavoritesForSelection = () => {
+    const nextFavorite = selected.some((archive) => !archive.isFavorite);
+    void runBulk(
+      selected,
+      (archive) => setFavorite(archive.archiveId, nextFavorite),
+      "選択作品のお気に入りを更新できませんでした",
+    );
+  };
+
+  const startConversion = () => {
+    setConvertingQueue(selected.filter((archive) => isConvertible(archive.format)));
+  };
+
+  const closeConversion = () => {
+    const hasNext = convertingQueue.length > 1;
+    setConvertingQueue((current) => current.slice(1));
+    if (!hasNext) onMutated();
+  };
 
   if (archives === null) {
     return <p className="py-16 text-center text-sm text-slate-500">読み込んでいます…</p>;
@@ -120,10 +223,8 @@ export function LibraryView({
           <li key={archive.archiveId}>
             <ArchiveCard
               archive={archive}
-              onSelect={() =>
-                setSelectedId((current) =>
-                  current === archive.archiveId ? null : archive.archiveId,
-                )
+              onSelect={(additive, range) =>
+                selectArchive(archive.archiveId, additive, range)
               }
               onOpen={() =>
                 mutateless(
@@ -132,46 +233,54 @@ export function LibraryView({
                 )
               }
               onToggleFavorite={() => void toggleFavorite(archive)}
-              selected={archive.archiveId === selectedId}
+              selected={selectedIds.includes(archive.archiveId)}
             />
           </li>
         ))}
       </ul>
-      {selected && (
+      {selected.length === 1 && (
         <ArchiveDetail
-          archive={selected}
+          archive={selected[0]}
           onAddTag={(category: TagCategory, name: string) =>
             mutate(
-              () => addTag(selected.archiveId, category, name),
+              () => addTag(selected[0].archiveId, category, name),
               "タグを追加できませんでした",
             )
           }
-          onClose={() => setSelectedId(null)}
-          onConvert={() => setConverting(selected)}
+          onClose={() => setSelectedIds([])}
+          onConvert={() => startConversion()}
           onRemoveTag={(tagId) =>
             mutate(
-              () => removeTag(selected.archiveId, tagId),
+              () => removeTag(selected[0].archiveId, tagId),
               "タグを外せませんでした",
             )
           }
           onRegenerateCover={(entryName) =>
             mutate(
-              () => regenerateThumbnail(selected.archiveId, entryName),
+              () => regenerateThumbnail(selected[0].archiveId, entryName),
               "表紙を作り直せませんでした",
             )
           }
-          onToggleFavorite={() => void toggleFavorite(selected)}
+          onToggleFavorite={() => void toggleFavorite(selected[0])}
+        />
+      )}
+      {selected.length > 1 && (
+        <SelectionDetail
+          archives={selected}
+          busy={bulkBusy}
+          onAddTag={addTagToSelection}
+          onClose={() => setSelectedIds([])}
+          onConvert={startConversion}
+          onFavorite={toggleFavoritesForSelection}
+          onRemoveTag={removeTagFromSelection}
         />
       )}
       {converting && (
         <ConvertDialog
           archive={converting}
+          key={converting.archiveId}
           onBusyChange={onConvertingChange}
-          onClose={() => {
-            setConverting(null);
-            setSelectedId(null);
-            onMutated();
-          }}
+          onClose={closeConversion}
           onComplete={(result) => onConvertComplete(converting.filename, result)}
         />
       )}

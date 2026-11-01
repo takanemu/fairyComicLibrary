@@ -4,7 +4,7 @@ import { ArchiveSummary, thumbnailUrl } from "../../lib/library";
 type Props = {
   archive: ArchiveSummary;
   selected: boolean;
-  onSelect: () => void;
+  onSelect: (additive: boolean, range: boolean) => void;
   onOpen: () => void;
   onToggleFavorite: () => void;
 };
@@ -44,11 +44,13 @@ export function ArchiveCard({ archive, selected, onSelect, onOpen, onToggleFavor
   useEffect(() => cancelPendingSelect, []);
 
   // ダブルクリックでは詳細ペインを開閉しないよう、選択を遅延して取り消せるようにする
-  const handleClick = () => {
+  const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    const additive = event.ctrlKey || event.metaKey;
+    const range = event.shiftKey;
     cancelPendingSelect();
     clickTimer.current = window.setTimeout(() => {
       clickTimer.current = null;
-      onSelect();
+      onSelect(additive, range);
     }, 250);
   };
 
@@ -67,9 +69,11 @@ export function ArchiveCard({ archive, selected, onSelect, onOpen, onToggleFavor
     >
       <button
         aria-label={`${archive.filename} の詳細を表示`}
+        aria-pressed={selected}
         className="block w-full text-left"
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
+        title="クリックで選択、Ctrl/⌘+クリックで複数選択、Shift+クリックで範囲選択"
         type="button"
       >
         <div className="grid aspect-[2/3] w-full place-items-center overflow-hidden bg-black/20">
