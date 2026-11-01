@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use std::{
     fs,
@@ -108,6 +108,15 @@ pub struct RegenerateSummary {
     pub first_failure: Option<String>,
 }
 
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UnmanageSummary {
+    pub moved: u64,
+    pub failed: u64,
+    pub failures: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
 struct ArchiveRecord {
     relative_path: String,
     format: String,
@@ -149,6 +158,25 @@ fn archive_file(root: &Path, record: &ArchiveRecord) -> Result<PathBuf, String> 
     Ok(path)
 }
 
+fn canonical_path_within(root: &Path, path: &Path, label: &str) -> Result<PathBuf, String> {
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| format!("リポジトリの場所を確認できませんでした: {error}"))?;
+    let canonical_path = fs::canonicalize(path)
+        .map_err(|error| format!("{label}を確認できませんでした: {error}"))?;
+    if !canonical_path.starts_with(canonical_root) {
+        return Err(format!("{label}がリポジトリの外を参照しています。"));
+    }
+    Ok(canonical_path)
+}
+
+fn cleanup_file_note(path: &Path, label: &str) -> String {
+    match fs::remove_file(path) {
+        Ok(()) => String::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => format!(" {label}も削除できませんでした: {error}"),
+    }
+}
+
 pub fn archive_path(root: &Path, archive_id: &str) -> Result<PathBuf, String> {
     let connection = Connection::open(root.join(DATABASE))
         .map_err(|error| format!("SQLiteデータベースを開けませんでした: {error}"))?;
@@ -161,6 +189,303 @@ pub fn list_cover_candidates(root: &Path, archive_id: &str) -> Result<Vec<String
         .map_err(|error| format!("SQLiteデータベースを開けませんでした: {error}"))?;
     let record = archive_record(&connection, archive_id)?;
     crate::thumbnails::list_images(&archive_file(root, &record)?, &record.format)
+}
+
+pub fn unmanage_archives(
+    root: &Path,
+    download_directory: &Path,
+    archive_ids: &[String],
+) -> Result<UnmanageSummary, String> {
+    if !download_directory.is_dir() {
+        return Err(format!(
+            "ダウンロードフォルダが見つからないか、フォルダではありません（{}）。",
+            download_directory.display()
+        ));
+    }
+
+    let mut summary = UnmanageSummary {
+        moved: 0,
+        failed: 0,
+        failures: Vec::new(),
+        warnings: Vec::new(),
+    };
+    let mut seen = std::collections::HashSet::new();
+    for archive_id in archive_ids.iter().filter(|id| seen.insert(id.as_str())) {
+        match unmanage_archive(root, download_directory, archive_id) {
+            Ok((filename, warning)) => {
+                summary.moved += 1;
+                if let Some(warning) = warning {
+                    summary.warnings.push(format!("{filename}: {warning}"));
+                }
+            }
+            Err(error) => {
+                summary.failed += 1;
+                summary.failures.push(error);
+            }
+        }
+    }
+    Ok(summary)
+}
+
+fn unmanage_archive(
+    root: &Path,
+    download_directory: &Path,
+    archive_id: &str,
+) -> Result<(String, Option<String>), String> {
+    let mut connection = Connection::open(root.join(DATABASE))
+        .map_err(|error| format!("SQLiteデータベースを開けませんでした: {error}"))?;
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .map_err(|error| format!("SQLite外部キー制約を有効にできませんでした: {error}"))?;
+
+    if !is_archive_id(archive_id) {
+        return Err("アーカイブIDが不正です。".to_string());
+    }
+    let archive_record = connection
+        .query_row(
+            "SELECT original_filename, relative_path, thumbnail_relative_path
+                 FROM archives WHERE archive_id = ?1",
+            [archive_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|error| format!("アーカイブ情報を読み取れませんでした: {error}"))?
+        .ok_or_else(|| "対象のアーカイブが見つかりません。".to_string())?;
+    let (filename, relative_path, thumbnail_relative_path): (String, String, Option<String>) =
+        archive_record;
+    if !is_safe_relative(&relative_path) {
+        return Err(format!("{filename}: アーカイブの保存先パスが不正です。"));
+    }
+    let filename_path = Path::new(&filename);
+    if filename.is_empty()
+        || filename_path.file_name().and_then(|name| name.to_str()) != Some(filename.as_str())
+        || filename_path.components().count() != 1
+    {
+        return Err(format!("{filename}: ファイル名が不正です。"));
+    }
+
+    let archive_source = root.join(&relative_path);
+    canonical_path_within(root, &archive_source, "アーカイブ")?;
+    let source_metadata = fs::symlink_metadata(&archive_source)
+        .map_err(|error| format!("{filename}: アーカイブを確認できませんでした: {error}"))?;
+    if !source_metadata.file_type().is_file() {
+        return Err(format!(
+            "{filename}: アーカイブが通常ファイルではありません。"
+        ));
+    }
+
+    let thumbnail_source = match thumbnail_relative_path {
+        Some(relative) => {
+            if !is_safe_relative(&relative) {
+                return Err(format!("{filename}: サムネイルの保存先パスが不正です。"));
+            }
+            let path = root.join(relative);
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_file() => {
+                    canonical_path_within(root, &path, "サムネイル")?;
+                    Some(path)
+                }
+                Ok(_) => {
+                    return Err(format!(
+                        "{filename}: サムネイルが通常ファイルではありません。"
+                    ))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(format!(
+                        "{filename}: サムネイルを確認できませんでした: {error}"
+                    ))
+                }
+            }
+        }
+        None => None,
+    };
+
+    let destination = download_directory.join(&filename);
+    let temporary_download = download_directory.join(format!(".{archive_id}.unmanage.part"));
+    let mut input = fs::File::open(&archive_source)
+        .map_err(|error| format!("{filename}: アーカイブを開けませんでした: {error}"))?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary_download)
+        .map_err(|error| {
+            format!("{filename}: ダウンロード用一時ファイルを作成できませんでした: {error}")
+        })?;
+    if let Err(error) = std::io::copy(&mut input, &mut output).and_then(|_| output.sync_all()) {
+        drop(output);
+        let cleanup_note = cleanup_file_note(&temporary_download, "ダウンロード用一時ファイル");
+        return Err(format!(
+            "{filename}: ダウンロードフォルダへコピーできませんでした: {error}{cleanup_note}"
+        ));
+    }
+    drop(output);
+    if let Err(error) = fs::hard_link(&temporary_download, &destination) {
+        let cleanup_note = cleanup_file_note(&temporary_download, "ダウンロード用一時ファイル");
+        let reason = if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "同名ファイルがすでにあるため、上書きせずに中止しました。".to_string()
+        } else {
+            format!("ダウンロードフォルダへ配置できませんでした: {error}")
+        };
+        return Err(format!("{filename}: {reason}{cleanup_note}"));
+    }
+    if let Err(error) = fs::remove_file(&temporary_download) {
+        let temporary_cleanup = cleanup_file_note(&temporary_download, "一時ファイル");
+        let destination_cleanup = cleanup_file_note(&destination, "ダウンロード先のコピー");
+        return Err(format!(
+            "{filename}: 一時ファイルを整理できませんでした: {error}{temporary_cleanup}{destination_cleanup}"
+        ));
+    }
+
+    let archive_staging_directory = root.join("archives/.staging");
+    let thumbnail_staging_directory = root.join("thumbnails/.staging");
+    if let Err(error) = fs::create_dir_all(&archive_staging_directory) {
+        let cleanup_note = cleanup_file_note(&destination, "ダウンロード先のコピー");
+        return Err(format!(
+            "{filename}: 一時退避先を作成できませんでした: {error}{cleanup_note}"
+        ));
+    }
+    if let Err(error) =
+        canonical_path_within(root, &archive_staging_directory, "アーカイブ一時退避先")
+    {
+        let cleanup_note = cleanup_file_note(&destination, "ダウンロード先のコピー");
+        return Err(format!("{filename}: {error}{cleanup_note}"));
+    }
+    let archive_staging = archive_staging_directory.join(format!("{archive_id}.unmanage.part"));
+    if archive_staging.exists() {
+        let cleanup_note = cleanup_file_note(&destination, "ダウンロード先のコピー");
+        return Err(format!(
+            "{filename}: 以前の一時退避ファイルが残っているため処理できません。{cleanup_note}"
+        ));
+    }
+    if let Err(error) = fs::rename(&archive_source, &archive_staging) {
+        let cleanup_note = cleanup_file_note(&destination, "ダウンロード先のコピー");
+        return Err(format!(
+            "{filename}: 管理リポジトリから退避できませんでした: {error}{cleanup_note}"
+        ));
+    }
+
+    let thumbnail_staging = if let Some(source) = thumbnail_source.as_ref() {
+        if let Err(error) = fs::create_dir_all(&thumbnail_staging_directory) {
+            let restore = fs::rename(&archive_staging, &archive_source);
+            let cleanup_note = cleanup_file_note(&destination, "ダウンロード先のコピー");
+            return Err(format!(
+                "{filename}: サムネイルの一時退避先を作成できませんでした: {error}{}{cleanup_note}",
+                restore
+                    .err()
+                    .map(|error| format!(" アーカイブの復元にも失敗しました: {error}"))
+                    .unwrap_or_default()
+            ));
+        }
+        if let Err(error) =
+            canonical_path_within(root, &thumbnail_staging_directory, "サムネイル一時退避先")
+        {
+            let restore = fs::rename(&archive_staging, &archive_source);
+            let cleanup_note = cleanup_file_note(&destination, "ダウンロード先のコピー");
+            let restore_note = restore
+                .err()
+                .map(|error| format!(" アーカイブの復元にも失敗しました: {error}"))
+                .unwrap_or_default();
+            return Err(format!("{filename}: {error}{restore_note}{cleanup_note}"));
+        }
+        let staging = thumbnail_staging_directory.join(format!("{archive_id}.unmanage.part"));
+        if staging.exists() {
+            let restore = fs::rename(&archive_staging, &archive_source);
+            let cleanup_note = cleanup_file_note(&destination, "ダウンロード先のコピー");
+            return Err(format!(
+                "{filename}: 以前のサムネイル一時退避ファイルが残っているため処理できません。{}{cleanup_note}",
+                restore
+                    .err()
+                    .map(|error| format!(" アーカイブの復元にも失敗しました: {error}"))
+                    .unwrap_or_default()
+            ));
+        }
+        if let Err(error) = fs::rename(source, &staging) {
+            let restore = fs::rename(&archive_staging, &archive_source);
+            let cleanup_note = cleanup_file_note(&destination, "ダウンロード先のコピー");
+            return Err(format!(
+                "{filename}: サムネイルを退避できませんでした: {error}{}{cleanup_note}",
+                restore
+                    .err()
+                    .map(|error| format!(" アーカイブの復元にも失敗しました: {error}"))
+                    .unwrap_or_default()
+            ));
+        }
+        Some(staging)
+    } else {
+        None
+    };
+
+    let remove_result = (|| {
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("アーカイブ削除を開始できませんでした: {error}"))?;
+        let removed = transaction
+            .execute("DELETE FROM archives WHERE archive_id = ?1", [archive_id])
+            .map_err(|error| format!("アーカイブ情報を削除できませんでした: {error}"))?;
+        if removed != 1 {
+            return Err(
+                "対象のアーカイブが見つからないため、DBから削除できませんでした。".to_string(),
+            );
+        }
+        transaction
+            .execute(
+                "DELETE FROM tags
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM archive_tags WHERE archive_tags.tag_id = tags.id
+                 )",
+                [],
+            )
+            .map_err(|error| format!("未使用のタグを整理できませんでした: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("アーカイブ削除を確定できませんでした: {error}"))
+    })();
+
+    if let Err(error) = remove_result {
+        let thumbnail_restore = thumbnail_staging
+            .as_ref()
+            .map(|staging| {
+                let source = thumbnail_source.as_ref().expect("staged thumbnail source");
+                fs::rename(staging, source)
+            })
+            .transpose();
+        let archive_restore = fs::rename(&archive_staging, &archive_source);
+        let cleanup_note = cleanup_file_note(&destination, "ダウンロード先のコピー");
+        let restore_errors = thumbnail_restore
+            .err()
+            .into_iter()
+            .chain(archive_restore.err())
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        let restore_note = if restore_errors.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " ファイルの復元にも失敗しました: {}",
+                restore_errors.join("、")
+            )
+        };
+        return Err(format!("{filename}: {error}{restore_note}{cleanup_note}"));
+    }
+
+    let mut warnings = Vec::new();
+    if let Err(error) = fs::remove_file(&archive_staging) {
+        warnings.push(format!(
+            "管理リポジトリ内の一時ファイルを削除できませんでした: {error}"
+        ));
+    }
+    if let Some(staging) = thumbnail_staging {
+        if let Err(error) = fs::remove_file(staging) {
+            warnings.push(format!(
+                "管理リポジトリ内のサムネイル一時ファイルを削除できませんでした: {error}"
+            ));
+        }
+    }
+    Ok((
+        filename,
+        (!warnings.is_empty()).then(|| warnings.join("、")),
+    ))
 }
 
 // entry_name が None なら自動抽出の規則、Some なら利用者が選んだ画像から作り直す。
@@ -382,7 +707,7 @@ fn copy_repository(root: &Path, destination: &Path) -> Result<BackupSummary, Str
 
 #[cfg(test)]
 mod tests {
-    use super::{backup, verify};
+    use super::{backup, unmanage_archives, verify};
     use crate::repository;
     use rusqlite::Connection;
     use std::fs;
@@ -418,6 +743,131 @@ mod tests {
         assert_eq!(warnings.len(), 2);
         assert!(warnings[0].contains("archives/ab/book.cbz"));
         assert!(warnings[1].contains("thumbnails/ab/x.webp"));
+    }
+
+    #[test]
+    fn moves_archive_and_removes_its_orphaned_metadata() {
+        let repo = repository_with_archive();
+        let downloads = tempfile::tempdir().expect("downloads directory");
+        let id = "ab".repeat(32);
+        let other_id = "cd".repeat(32);
+        let connection = Connection::open(repo.path().join("database/library.sqlite3")).unwrap();
+        connection
+            .execute(
+                "INSERT INTO tags (name, category) VALUES
+                    ('shared author', 'author'), ('orphan series', 'series')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO archive_tags (archive_id, tag_id)
+                 SELECT ?1, id FROM tags",
+                [&id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO archives (archive_id, original_filename, relative_path, format,
+                    file_size, imported_at)
+                 VALUES (?1, 'other.cbz', 'archives/cd/other.cbz', 'cbz', 1,
+                    '2026-01-01T00:00:00Z')",
+                [&other_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO archive_tags (archive_id, tag_id)
+                 SELECT ?1, id FROM tags WHERE name = 'shared author'",
+                [&other_id],
+            )
+            .unwrap();
+        drop(connection);
+
+        let summary =
+            unmanage_archives(repo.path(), downloads.path(), std::slice::from_ref(&id)).unwrap();
+
+        assert_eq!(summary.moved, 1);
+        assert_eq!(summary.failed, 0);
+        assert!(downloads.path().join("book.cbz").exists());
+        assert!(!repo.path().join("archives/ab/book.cbz").exists());
+        assert!(!repo.path().join("thumbnails/ab/x.webp").exists());
+        let connection = Connection::open(repo.path().join("database/library.sqlite3")).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM archives", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT name FROM tags", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "shared author"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM archive_tags", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn does_not_overwrite_downloads_or_remove_managed_archive_on_name_collision() {
+        let repo = repository_with_archive();
+        let downloads = tempfile::tempdir().expect("downloads directory");
+        fs::write(downloads.path().join("book.cbz"), b"keep").unwrap();
+        let id = "ab".repeat(32);
+
+        let summary =
+            unmanage_archives(repo.path(), downloads.path(), std::slice::from_ref(&id)).unwrap();
+
+        assert_eq!(summary.moved, 0);
+        assert_eq!(summary.failed, 1);
+        assert!(summary.failures[0].contains("上書きせず"));
+        assert_eq!(
+            fs::read(downloads.path().join("book.cbz")).unwrap(),
+            b"keep"
+        );
+        assert!(repo.path().join("archives/ab/book.cbz").exists());
+        let connection = Connection::open(repo.path().join("database/library.sqlite3")).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM archives", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_archives_reached_through_a_symlink_outside_the_repository() {
+        use std::os::unix::fs::symlink;
+
+        let repo = repository_with_archive();
+        let downloads = tempfile::tempdir().expect("downloads directory");
+        let outside = tempfile::tempdir().expect("outside directory");
+        fs::remove_file(repo.path().join("archives/ab/book.cbz")).unwrap();
+        fs::remove_dir(repo.path().join("archives/ab")).unwrap();
+        fs::write(outside.path().join("book.cbz"), b"outside").unwrap();
+        symlink(outside.path(), repo.path().join("archives/ab")).unwrap();
+        let id = "ab".repeat(32);
+
+        let summary =
+            unmanage_archives(repo.path(), downloads.path(), std::slice::from_ref(&id)).unwrap();
+
+        assert_eq!(summary.moved, 0);
+        assert_eq!(summary.failed, 1);
+        assert!(summary.failures[0].contains("リポジトリの外"));
+        assert_eq!(
+            fs::read(outside.path().join("book.cbz")).unwrap(),
+            b"outside"
+        );
+        assert!(!downloads.path().join("book.cbz").exists());
     }
 
     #[test]

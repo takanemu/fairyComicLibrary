@@ -97,6 +97,16 @@ export const addTag = (archiveId: string, category: TagCategory, name: string) =
 export const removeTag = (archiveId: string, tagId: number) =>
   invoke<void>("remove_tag", { archiveId, tagId });
 
+export type UnmanageSummary = {
+  moved: number;
+  failed: number;
+  failures: string[];
+  warnings: string[];
+};
+
+export const unmanageArchives = (archiveIds: string[]) =>
+  invoke<UnmanageSummary>("unmanage_archives", { archiveIds });
+
 // サムネイルは長期キャッシュされるため、再作成したIDにはクエリで版を付けて取り直させる。
 const thumbnailRevisions = new Map<string, number>();
 let thumbnailEpoch = 0;

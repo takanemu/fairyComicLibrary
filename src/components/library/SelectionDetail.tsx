@@ -14,6 +14,7 @@ type Props = {
   onAddTag: (category: TagCategory, name: string) => Promise<boolean>;
   onRemoveTag: (tagId: number) => void;
   onConvert: () => void;
+  onUnmanage: () => void;
 };
 
 export function SelectionDetail({
@@ -24,6 +25,7 @@ export function SelectionDetail({
   onAddTag,
   onRemoveTag,
   onConvert,
+  onUnmanage,
 }: Props) {
   const [category, setCategory] = useState<TagCategory>("author");
   const [name, setName] = useState("");
@@ -133,6 +135,15 @@ export function SelectionDetail({
           ZIP/CBZ形式のみを順番に変換します。
         </p>
       )}
+
+      <button
+        className="mt-2 rounded-lg border border-amber-300/20 px-3 py-2 text-xs font-medium text-amber-100 transition hover:bg-amber-300/[0.08] disabled:opacity-50"
+        disabled={busy}
+        onClick={onUnmanage}
+        type="button"
+      >
+        管理対象外にする（ダウンロードへ移動）{` (${archives.length} 件)`}
+      </button>
 
       <h3 className="mb-2 mt-6 text-xs font-semibold text-slate-400">選択作品のタグ</h3>
       {tags.size === 0 ? (

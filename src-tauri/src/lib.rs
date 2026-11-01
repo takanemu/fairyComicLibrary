@@ -52,6 +52,7 @@ pub fn run() {
             commands::add_tag,
             commands::remove_tag,
             commands::backup_repository,
+            commands::unmanage_archives,
             commands::regenerate_thumbnail,
             commands::regenerate_missing_thumbnails,
             commands::list_cover_candidates,

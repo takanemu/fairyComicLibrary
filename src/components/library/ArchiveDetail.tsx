@@ -17,6 +17,8 @@ type Props = {
   onRemoveTag: (tagId: number) => Promise<void>;
   onRegenerateCover: (entryName: string | null) => Promise<void>;
   onConvert: () => void;
+  onUnmanage: () => void;
+  unmanageBusy: boolean;
 };
 
 export function ArchiveDetail({
@@ -27,6 +29,8 @@ export function ArchiveDetail({
   onRemoveTag,
   onRegenerateCover,
   onConvert,
+  onUnmanage,
+  unmanageBusy,
 }: Props) {
   const [coverBusy, setCoverBusy] = useState(false);
   const [picking, setPicking] = useState(false);
@@ -147,6 +151,15 @@ export function ArchiveDetail({
         type="button"
       >
         {archive.isFavorite ? "♥ お気に入り済み" : "♡ お気に入りに追加"}
+      </button>
+
+      <button
+        className="mt-2 w-full rounded-lg border border-amber-300/20 px-3 py-2 text-xs font-medium text-amber-100 transition hover:bg-amber-300/[0.08] disabled:opacity-50"
+        disabled={unmanageBusy}
+        onClick={onUnmanage}
+        type="button"
+      >
+        {unmanageBusy ? "移動中…" : "管理対象外にする（ダウンロードへ移動）"}
       </button>
 
       <div className="mt-2 flex gap-2">

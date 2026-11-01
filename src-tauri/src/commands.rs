@@ -1,6 +1,6 @@
 use crate::{library, repository, AppState};
 use std::path::PathBuf;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 #[tauri::command]
 pub fn get_repository_status(
@@ -121,6 +121,22 @@ pub async fn backup_repository(
     })
     .await
     .map_err(|error| format!("バックアップ処理に失敗しました: {error}"))?
+}
+
+#[tauri::command]
+pub async fn unmanage_archives(
+    archive_ids: Vec<String>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::maintenance::UnmanageSummary, String> {
+    let download_directory = app
+        .path()
+        .download_dir()
+        .map_err(|error| format!("ダウンロードフォルダを取得できませんでした: {error}"))?;
+    with_exclusive_repository(&state, move |root| {
+        crate::maintenance::unmanage_archives(&root, &download_directory, &archive_ids)
+    })
+    .await
 }
 
 async fn with_exclusive_repository<T: Send + 'static>(

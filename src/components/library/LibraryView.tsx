@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import {
   ArchiveQuery,
   ArchiveSummary,
@@ -10,6 +11,7 @@ import {
   regenerateThumbnail,
   isConvertible,
   setFavorite,
+  unmanageArchives,
 } from "../../lib/library";
 import { ArchiveCard } from "./ArchiveCard";
 import { ArchiveDetail } from "./ArchiveDetail";
@@ -184,6 +186,40 @@ export function LibraryView({
     );
   };
 
+  const unmanageSelection = async () => {
+    if (bulkBusy || selected.length === 0) return;
+    setBulkBusy(true);
+    try {
+      const count = selected.length;
+      const confirmed = await ask(
+        `${count}件のアーカイブをダウンロードフォルダへ移動し、管理リポジトリから削除します。サムネイルとタグ付けも削除され、他の作品で使われないタグは一覧から削除されます。続行しますか？`,
+        { title: "管理対象外にしますか？", kind: "warning" },
+      );
+      if (!confirmed) return;
+
+      const summary = await unmanageArchives(
+        selected.map((archive) => archive.archiveId),
+      );
+      if (summary.moved > 0) onMutated();
+      const details = [
+        summary.moved > 0 ? `${summary.moved}件を移動しました。` : null,
+        summary.failed > 0
+          ? `${summary.failed}件は移動できませんでした: ${summary.failures.join(" / ")}`
+          : null,
+        summary.warnings.length > 0
+          ? `後処理に注意が必要です: ${summary.warnings.join(" / ")}`
+          : null,
+      ]
+        .filter((message) => message !== null)
+        .join(" ");
+      onError(summary.failed > 0 || summary.warnings.length > 0 ? details : null);
+    } catch (reason) {
+      onError(`管理対象外への移動に失敗しました: ${String(reason)}`);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const startConversion = () => {
     setConvertingQueue(selected.filter((archive) => isConvertible(archive.format)));
   };
@@ -249,6 +285,8 @@ export function LibraryView({
           }
           onClose={() => setSelectedIds([])}
           onConvert={() => startConversion()}
+          onUnmanage={() => void unmanageSelection()}
+          unmanageBusy={bulkBusy}
           onRemoveTag={(tagId) =>
             mutate(
               () => removeTag(selected[0].archiveId, tagId),
@@ -273,6 +311,7 @@ export function LibraryView({
           onConvert={startConversion}
           onFavorite={toggleFavoritesForSelection}
           onRemoveTag={removeTagFromSelection}
+          onUnmanage={() => void unmanageSelection()}
         />
       )}
       {converting && (
