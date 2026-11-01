@@ -1,15 +1,16 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::{
+    fs::File as StdFile,
+    io::{Read, Seek, SeekFrom},
+    os::fd::AsRawFd,
+    os::unix::fs::MetadataExt,
     path::Path,
+    process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::SystemTime,
 };
-use tokio::{
-    fs::{self, File, OpenOptions},
-    io::{AsyncReadExt, AsyncWriteExt},
-};
+use tokio::fs::{self, File, OpenOptions};
 
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -33,13 +34,13 @@ pub async fn import_archive(
     repository_root: &Path,
     source_path: &Path,
 ) -> Result<ImportOutcome, String> {
-    let source_metadata = fs::symlink_metadata(source_path)
+    let path_metadata = fs::symlink_metadata(source_path)
         .await
         .map_err(|error| format!("選択したファイルを確認できませんでした: {error}"))?;
-    if source_metadata.file_type().is_symlink() {
+    if path_metadata.file_type().is_symlink() {
         return Err("シンボリックリンクではなく、アーカイブ本体を選択してください。".to_string());
     }
-    if !source_metadata.is_file() {
+    if !path_metadata.is_file() {
         return Err("インポート対象には通常ファイルを選択してください。".to_string());
     }
 
@@ -65,32 +66,44 @@ pub async fn import_archive(
         ));
     }
 
-    let staging_directory = repository_root.join("archives/.staging");
-    fs::create_dir_all(&staging_directory)
+    let lock_path = source_path.clone();
+    let source_lock = tokio::task::spawn_blocking(move || open_shared_locked_file(&lock_path))
         .await
-        .map_err(|error| format!("インポート用一時ディレクトリを作成できませんでした: {error}"))?;
-    let staging_path = staging_directory.join(next_staging_name());
+        .map_err(|error| format!("元ファイルのロック処理に失敗しました: {error}"))??;
+    let source_metadata = source_lock
+        .metadata()
+        .map_err(|error| format!("元ファイルの情報を取得できませんでした: {error}"))?;
+    if !source_metadata.is_file() {
+        return Err("インポート対象には通常ファイルを選択してください。".to_string());
+    }
 
-    let (archive_id, file_size) =
-        copy_and_hash(&source_path, &staging_path, &source_metadata, &extension).await?;
+    let mut header_file = source_lock
+        .try_clone()
+        .map_err(|error| format!("アーカイブのヘッダーを読み込めませんでした: {error}"))?;
+    let mut header = [0_u8; 8];
+    header_file
+        .read_exact(&mut header)
+        .map_err(|error| format!("アーカイブのヘッダーを読み込めませんでした: {error}"))?;
+    validate_signature(&extension, &header)?;
+
+    let hash_file = source_lock
+        .try_clone()
+        .map_err(|error| format!("アーカイブのハッシュ計算を開始できませんでした: {error}"))?;
+    let archive_id = tokio::task::spawn_blocking(move || sha256sum_file(hash_file))
+        .await
+        .map_err(|error| format!("SHA-256計算処理に失敗しました: {error}"))??;
+    let file_size = source_metadata.len();
 
     let database_path = repository_root.join("database/library.sqlite3");
-    let existing_archive = match find_archive(&database_path, &archive_id) {
-        Ok(existing_archive) => existing_archive,
-        Err(error) => {
-            remove_if_exists(&staging_path).await;
-            return Err(error);
-        }
-    };
+    let existing_archive = find_archive(&database_path, &archive_id)?;
     if let Some(relative_path) = existing_archive {
-        remove_if_exists(&staging_path).await;
         return Ok(ImportOutcome::Duplicate {
             archive_id,
             relative_path,
         });
     }
 
-    let count_path = staging_path.clone();
+    let count_path = source_path.clone();
     let count_format = extension.clone();
     let page_count = match tokio::task::spawn_blocking(move || {
         crate::thumbnails::count_pages(&count_path, &count_format)
@@ -99,84 +112,14 @@ pub async fn import_archive(
     {
         Ok(Ok(count)) => count,
         Ok(Err(error)) => {
-            remove_if_exists(&staging_path).await;
             return Err(format!(
                 "ページ数を取得できなかったため、インポートを中止しました: {error}"
             ));
         }
         Err(error) => {
-            remove_if_exists(&staging_path).await;
             return Err(format!(
                 "ページ数の取得処理に失敗したため、インポートを中止しました: {error}"
             ));
-        }
-    };
-
-    let relative_path = format!("archives/{}/{}", &archive_id[..2], filename);
-    let destination = repository_root.join(&relative_path);
-    let destination_directory = destination
-        .parent()
-        .ok_or_else(|| "アーカイブの保存先を作成できませんでした。".to_string())?;
-    if let Err(error) = fs::create_dir_all(destination_directory).await {
-        remove_if_exists(&staging_path).await;
-        return Err(format!("アーカイブの保存先を作成できませんでした: {error}"));
-    }
-
-    let destination_created = match fs::hard_link(&staging_path, &destination).await {
-        Ok(()) => {
-            if let Err(error) = fs::remove_file(&staging_path).await {
-                let rollback = fs::remove_file(&destination).await;
-                remove_empty_directory(destination_directory).await;
-                let rollback_message = rollback
-                    .err()
-                    .map(|rollback_error| {
-                        format!(" 保存先の取り消しにも失敗しました: {rollback_error}")
-                    })
-                    .unwrap_or_default();
-                return Err(format!(
-                    "アーカイブの一時ファイルを整理できませんでした: {error}{rollback_message}"
-                ));
-            }
-            true
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            match hash_file(&destination).await {
-                Ok(existing_hash) if existing_hash == archive_id => {
-                    remove_if_exists(&staging_path).await;
-                    false
-                }
-                Ok(_) => {
-                    remove_if_exists(&staging_path).await;
-                    return Err("同じ分散ディレクトリに同名で内容の異なるアーカイブが既にあります。ファイル名はリネームしないため、元ファイルの名前を変更してからインポートしてください。".to_string());
-                }
-                Err(hash_error) => {
-                    remove_if_exists(&staging_path).await;
-                    return Err(format!(
-                        "保存先にファイルがありますが内容を検証できませんでした: {hash_error}"
-                    ));
-                }
-            }
-        }
-        Err(link_error) => {
-            if let Err(copy_error) = copy_staged_file(&staging_path, &destination).await {
-                remove_if_exists(&staging_path).await;
-                return Err(format!(
-                    "ハードリンクでの配置に失敗しました ({link_error})。代替コピーにも失敗しました: {copy_error}"
-                ));
-            }
-            if let Err(error) = fs::remove_file(&staging_path).await {
-                let rollback = fs::remove_file(&destination).await;
-                let rollback_message = rollback
-                    .err()
-                    .map(|rollback_error| {
-                        format!(" 保存先の取り消しにも失敗しました: {rollback_error}")
-                    })
-                    .unwrap_or_default();
-                return Err(format!(
-                    "アーカイブの一時ファイルを整理できませんでした: {error}{rollback_message}"
-                ));
-            }
-            true
         }
     };
 
@@ -184,17 +127,13 @@ pub async fn import_archive(
     let thumbnail_destination = repository_root.join(&thumbnail_relative_path);
     let thumbnail_staging_directory = repository_root.join("thumbnails/.staging");
     if let Err(error) = fs::create_dir_all(&thumbnail_staging_directory).await {
-        let rollback = rollback_archive(&destination, destination_created).await;
         return Err(format!(
-            "サムネイル用一時ディレクトリを作成できませんでした: {error}{}",
-            rollback
-                .map(|message| format!(" {message}"))
-                .unwrap_or_default()
+            "サムネイル用一時ディレクトリを作成できませんでした: {error}"
         ));
     }
     let thumbnail_staging_path =
         thumbnail_staging_directory.join(format!("{}.webp.part", next_staging_name()));
-    let thumbnail_archive_path = destination.clone();
+    let thumbnail_archive_path = source_path.clone();
     let thumbnail_output_path = thumbnail_staging_path.clone();
     let thumbnail_format = extension.clone();
     let generated_thumbnail = match tokio::task::spawn_blocking(move || {
@@ -209,25 +148,59 @@ pub async fn import_archive(
         Ok(result) => result,
         Err(error) => {
             remove_if_exists(&thumbnail_staging_path).await;
-            let rollback = rollback_archive(&destination, destination_created).await;
-            return Err(format!(
-                "サムネイル生成処理に失敗しました: {error}{}",
-                rollback
-                    .map(|message| format!(" {message}"))
-                    .unwrap_or_default()
-            ));
+            return Err(format!("サムネイル生成処理に失敗しました: {error}"));
         }
     };
     if let Err(error) = generated_thumbnail {
         remove_if_exists(&thumbnail_staging_path).await;
-        let rollback = rollback_archive(&destination, destination_created).await;
         return Err(format!(
-            "表紙サムネイルを作成できなかったため、インポートを中止しました: {error}{}",
-            rollback
-                .map(|message| format!(" {message}"))
-                .unwrap_or_default()
+            "表紙サムネイルを作成できなかったため、インポートを中止しました: {error}"
         ));
     }
+
+    if !metadata_matches(
+        &source_metadata,
+        &fs::symlink_metadata(&source_path).await.ok(),
+    ) {
+        remove_if_exists(&thumbnail_staging_path).await;
+        return Err(
+            "処理中に元ファイルの場所または内容が変わったため、インポートを中止しました。"
+                .to_string(),
+        );
+    }
+
+    let relative_path = format!("archives/{}/{}", &archive_id[..2], filename);
+    let destination = repository_root.join(&relative_path);
+    let destination_directory = destination
+        .parent()
+        .ok_or_else(|| "アーカイブの保存先を作成できませんでした。".to_string())?;
+    if let Err(error) = fs::create_dir_all(destination_directory).await {
+        remove_if_exists(&thumbnail_staging_path).await;
+        return Err(format!("アーカイブの保存先を作成できませんでした: {error}"));
+    }
+    let archive_staging_path = repository_root
+        .join("archives/.staging")
+        .join(next_staging_name());
+    let destination_created = match install_archive(
+        &source_path,
+        &destination,
+        &archive_staging_path,
+        &archive_id,
+    )
+    .await
+    {
+        Ok(created) => created,
+        Err(error) => {
+            remove_if_exists(&thumbnail_staging_path).await;
+            remove_empty_directory(destination_directory).await;
+            return Err(error);
+        }
+    };
+    let source_is_destination = source_path == destination
+        || fs::canonicalize(&destination)
+            .await
+            .is_ok_and(|path| path == source_path);
+
     let thumbnail_directory = thumbnail_destination
         .parent()
         .map(Path::to_path_buf)
@@ -235,7 +208,6 @@ pub async fn import_archive(
     if let Err(error) = fs::create_dir_all(&thumbnail_directory).await {
         remove_if_exists(&thumbnail_staging_path).await;
         let rollback = rollback_archive(&destination, destination_created).await;
-        remove_empty_directory(&thumbnail_directory).await;
         return Err(format!(
             "サムネイルの保存先を作成できませんでした: {error}{}",
             rollback
@@ -283,22 +255,25 @@ pub async fn import_archive(
         return Err(error);
     }
 
-    let current_metadata = fs::metadata(&source_path).await;
-    let source_changed = current_metadata
-        .as_ref()
-        .map(|metadata| {
-            metadata.len() != source_metadata.len()
-                || metadata.modified().ok() != source_metadata.modified().ok()
-        })
-        .unwrap_or(true);
-    if source_changed {
+    if source_is_destination {
+        return Ok(ImportOutcome::Imported {
+            archive_id,
+            relative_path,
+            file_size,
+            source_removed: false,
+            warning: Some("元ファイルは既にリポジトリの保存先にあります。".to_string()),
+        });
+    }
+
+    let current_metadata = fs::symlink_metadata(&source_path).await.ok();
+    if !metadata_matches(&source_metadata, &current_metadata) {
         return Ok(ImportOutcome::Imported {
             archive_id,
             relative_path,
             file_size,
             source_removed: false,
             warning: Some(
-                "アーカイブは登録されましたが、読み込み後に元ファイルが変更または削除されたため、元ファイルは削除していません。"
+                "アーカイブは登録されましたが、元ファイルの場所または内容が変わったため、元ファイルは削除していません。"
                     .to_string(),
             ),
         });
@@ -324,23 +299,156 @@ pub async fn import_archive(
     }
 }
 
-async fn hash_file(path: &Path) -> Result<String, String> {
-    let mut file = File::open(path)
-        .await
-        .map_err(|error| format!("保存済みアーカイブを開けませんでした: {error}"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let bytes_read = file
-            .read(&mut buffer)
-            .await
-            .map_err(|error| format!("保存済みアーカイブを検証できませんでした: {error}"))?;
-        if bytes_read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes_read]);
+fn metadata_matches(expected: &std::fs::Metadata, actual: &Option<std::fs::Metadata>) -> bool {
+    actual.as_ref().is_some_and(|actual| {
+        expected.dev() == actual.dev()
+            && expected.ino() == actual.ino()
+            && expected.len() == actual.len()
+            && expected.modified().ok() == actual.modified().ok()
+    })
+}
+
+fn open_shared_locked_file(path: &Path) -> Result<StdFile, String> {
+    let file = StdFile::open(path)
+        .map_err(|error| format!("元ファイルを読み取り専用で開けませんでした: {error}"))?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) };
+    if result != 0 {
+        return Err(format!(
+            "元ファイルの共有ロックを取得できませんでした: {}",
+            std::io::Error::last_os_error()
+        ));
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(file)
+}
+
+fn sha256sum_file(mut file: StdFile) -> Result<String, String> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| format!("SHA-256計算の準備に失敗しました: {error}"))?;
+    let output = Command::new("sha256sum")
+        .stdin(Stdio::from(file))
+        .output()
+        .map_err(|error| format!("sha256sumを実行できませんでした: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "sha256sumに失敗しました: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let digest = output
+        .stdout
+        .get(..64)
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .filter(|digest| digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| "sha256sumの出力を解釈できませんでした。".to_string())?;
+    Ok(digest.to_ascii_lowercase())
+}
+
+async fn hash_file(path: &Path) -> Result<String, String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let file = StdFile::open(&path)
+            .map_err(|error| format!("保存済みアーカイブを開けませんでした: {error}"))?;
+        sha256sum_file(file)
+            .map_err(|error| format!("保存済みアーカイブを検証できませんでした: {error}"))
+    })
+    .await
+    .map_err(|error| format!("保存済みアーカイブの検証処理に失敗しました: {error}"))?
+}
+
+async fn install_archive(
+    source: &Path,
+    destination: &Path,
+    staging: &Path,
+    archive_id: &str,
+) -> Result<bool, String> {
+    match fs::hard_link(source, destination).await {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            validate_existing_archive(destination, archive_id).await
+        }
+        Err(link_error) => {
+            let staging_directory = staging
+                .parent()
+                .ok_or_else(|| "インポート用一時ディレクトリが不正です。".to_string())?;
+            fs::create_dir_all(staging_directory)
+                .await
+                .map_err(|error| {
+                    format!("インポート用一時ディレクトリを作成できませんでした: {error}")
+                })?;
+            if let Err(copy_error) = copy_with_cp(source, staging).await {
+                remove_if_exists(staging).await;
+                return Err(format!(
+                    "元ファイルを保存先へ直接配置できませんでした ({link_error})。代替コピーにも失敗しました: {copy_error}"
+                ));
+            }
+            match fs::hard_link(staging, destination).await {
+                Ok(()) => {
+                    if let Err(error) = fs::remove_file(staging).await {
+                        let rollback = fs::remove_file(destination).await;
+                        let rollback_message = rollback
+                            .err()
+                            .map(|rollback_error| {
+                                format!(" 保存先の取り消しにも失敗しました: {rollback_error}")
+                            })
+                            .unwrap_or_default();
+                        return Err(format!(
+                            "アーカイブの一時ファイルを整理できませんでした: {error}{rollback_message}"
+                        ));
+                    }
+                    Ok(true)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    remove_if_exists(staging).await;
+                    validate_existing_archive(destination, archive_id).await
+                }
+                Err(error) => {
+                    remove_if_exists(staging).await;
+                    Err(format!("アーカイブを保存先へ配置できませんでした: {error}"))
+                }
+            }
+        }
+    }
+}
+
+async fn validate_existing_archive(destination: &Path, archive_id: &str) -> Result<bool, String> {
+    match hash_file(destination).await {
+        Ok(existing_hash) if existing_hash == archive_id => Ok(false),
+        Ok(_) => Err("同じ分散ディレクトリに同名で内容の異なるアーカイブが既にあります。ファイル名はリネームしないため、元ファイルの名前を変更してからインポートしてください。".to_string()),
+        Err(error) => Err(format!(
+            "保存先にファイルがありますが内容を検証できませんでした: {error}"
+        )),
+    }
+}
+
+async fn copy_with_cp(source: &Path, destination: &Path) -> Result<(), String> {
+    let source = source.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("cp")
+            .arg("--reflink=auto")
+            .arg("--no-preserve=mode")
+            .arg("--")
+            .arg(&source)
+            .arg(&destination)
+            .output()
+            .map_err(|error| format!("cpを実行できませんでした: {error}"))?;
+        if output.status.success() {
+            let copied_file = StdFile::options()
+                .write(true)
+                .open(&destination)
+                .map_err(|error| format!("コピーしたアーカイブを開けませんでした: {error}"))?;
+            copied_file.sync_all().map_err(|error| {
+                format!("コピーしたアーカイブをディスクへ保存できませんでした: {error}")
+            })
+        } else {
+            Err(format!(
+                "cpに失敗しました: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    })
+    .await
+    .map_err(|error| format!("アーカイブのコピー処理に失敗しました: {error}"))?
 }
 
 async fn place_thumbnail(staging: &Path, destination: &Path) -> Result<bool, String> {
@@ -451,89 +559,6 @@ async fn copy_staged_file(source: &Path, destination: &Path) -> Result<(), Strin
     drop(destination_file);
     if result.is_err() {
         remove_if_exists(destination).await;
-    }
-    result
-}
-
-async fn copy_and_hash(
-    source_path: &Path,
-    staging_path: &Path,
-    original_metadata: &std::fs::Metadata,
-    extension: &str,
-) -> Result<(String, u64), String> {
-    let mut source = File::open(source_path)
-        .await
-        .map_err(|error| format!("アーカイブを読み込めませんでした: {error}"))?;
-    let mut staging = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(staging_path)
-        .await
-        .map_err(|error| format!("インポート用一時ファイルを作成できませんでした: {error}"))?;
-
-    let result = async {
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0_u8; 1024 * 1024];
-        let mut header = [0_u8; 8];
-        source
-            .read_exact(&mut header)
-            .await
-            .map_err(|error| format!("アーカイブのヘッダーを読み込めませんでした: {error}"))?;
-        validate_signature(extension, &header)?;
-        staging
-            .write_all(&header)
-            .await
-            .map_err(|error| format!("一時ファイルへの書き込みに失敗しました: {error}"))?;
-        hasher.update(header);
-        let mut file_size = header.len() as u64;
-
-        loop {
-            let bytes_read = source
-                .read(&mut buffer)
-                .await
-                .map_err(|error| format!("アーカイブの読み込みに失敗しました: {error}"))?;
-            if bytes_read == 0 {
-                break;
-            }
-
-            staging
-                .write_all(&buffer[..bytes_read])
-                .await
-                .map_err(|error| format!("一時ファイルへの書き込みに失敗しました: {error}"))?;
-            hasher.update(&buffer[..bytes_read]);
-            file_size = file_size
-                .checked_add(bytes_read as u64)
-                .ok_or_else(|| "アーカイブのサイズが扱える範囲を超えています。".to_string())?;
-        }
-
-        staging
-            .flush()
-            .await
-            .map_err(|error| format!("一時ファイルを確定できませんでした: {error}"))?;
-        staging
-            .sync_all()
-            .await
-            .map_err(|error| format!("一時ファイルをディスクへ保存できませんでした: {error}"))?;
-
-        let current_metadata = fs::metadata(source_path)
-            .await
-            .map_err(|error| format!("読み込み後に元ファイルを確認できませんでした: {error}"))?;
-        if current_metadata.len() != original_metadata.len()
-            || current_metadata.modified().ok() != original_metadata.modified().ok()
-            || file_size != original_metadata.len()
-        {
-            return Err(
-                "ハッシュ計算中に元ファイルが変更されたようです。ファイルを閉じてから再試行してください。"
-                    .to_string(),
-            );
-        }
-        Ok((format!("{:x}", hasher.finalize()), file_size))
-    }
-    .await;
-
-    drop(staging);
-    if result.is_err() {
-        remove_if_exists(staging_path).await;
     }
     result
 }
@@ -811,6 +836,7 @@ mod tests {
         };
         assert_eq!(archive_id, duplicate_id);
         assert!(second_source.exists());
+        assert!(!repository.path().join("archives/.staging").exists());
         let database_path = repository.path().join("database/library.sqlite3");
         assert_eq!(database::initialize(&database_path).expect("count"), 1);
         let connection = rusqlite::Connection::open(database_path).expect("open database");
@@ -827,6 +853,34 @@ mod tests {
         );
         crate::thumbnails::validate_existing_thumbnail(&repository.path().join(thumbnail_path))
             .expect("validate registered WebP thumbnail");
+    }
+
+    #[test]
+    fn source_file_is_opened_read_only_with_a_shared_lock() {
+        use std::os::fd::AsRawFd;
+
+        let directory = tempfile::tempdir().expect("temporary source");
+        let source_path = directory.path().join("archive.cbz");
+        std::fs::write(&source_path, b"archive").expect("write source");
+        let shared_lock = super::open_shared_locked_file(&source_path).expect("shared lock");
+        let writer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&source_path)
+            .expect("open writer");
+
+        let lock_result = unsafe { libc::flock(writer.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(lock_result, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        drop(shared_lock);
+        assert_eq!(
+            unsafe { libc::flock(writer.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
     }
 
     #[tokio::test]

@@ -1182,6 +1182,7 @@ name = "fairy-comic-library"
 version = "0.1.0"
 dependencies = [
  "image",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
