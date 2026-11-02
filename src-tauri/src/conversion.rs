@@ -1,13 +1,10 @@
-use image::{
-    codecs::avif::AvifEncoder, metadata::Orientation, DynamicImage, ExtendedColorType,
-    ImageDecoder, ImageEncoder, ImageReader, Limits,
-};
+use image::{metadata::Orientation, DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{self, BufReader, Cursor, Read},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
@@ -247,23 +244,118 @@ fn decode_with_orientation(bytes: &[u8]) -> Result<DynamicImage, String> {
     Ok(image)
 }
 
-// 変換できない画像（アニメーション・破損・上限超過）は None を返し、そのままコピーする。
-fn encode_avif(bytes: &[u8], speed: u8) -> Option<Vec<u8>> {
-    if is_animated_png(bytes) {
-        return None;
+struct AvifTempFiles {
+    input: PathBuf,
+    output: PathBuf,
+}
+
+impl AvifTempFiles {
+    fn create(directory: &Path, archive_id: &str, index: usize) -> Result<(Self, File), String> {
+        for nonce in 0..128 {
+            let prefix = format!("{archive_id}.{}.{index}.{nonce}", std::process::id());
+            let input = directory.join(format!("{prefix}.input.png"));
+            let output = directory.join(format!("{prefix}.output.avif"));
+            if output.exists() {
+                continue;
+            }
+            match OpenOptions::new().write(true).create_new(true).open(&input) {
+                Ok(file) => return Ok((Self { input, output }, file)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "AVIF変換用の一時画像を作成できませんでした: {error}"
+                    ));
+                }
+            }
+        }
+        Err("AVIF変換用の一時ファイル名を確保できませんでした。".to_string())
     }
-    let image = decode_with_orientation(bytes).ok()?;
-    let (width, height) = (image.width(), image.height());
-    let mut output = Vec::new();
-    let encoder = AvifEncoder::new_with_speed_quality(&mut output, speed, AVIF_QUALITY);
-    let written = if image.color().has_alpha() {
-        let rgba = image.to_rgba8();
-        encoder.write_image(rgba.as_raw(), width, height, ExtendedColorType::Rgba8)
-    } else {
-        let rgb = image.to_rgb8();
-        encoder.write_image(rgb.as_raw(), width, height, ExtendedColorType::Rgb8)
+}
+
+impl Drop for AvifTempFiles {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.input);
+        let _ = fs::remove_file(&self.output);
+    }
+}
+
+// 変換できない画像（アニメーション・破損・上限超過）は None を返し、そのままコピーする。
+fn encode_avif(
+    bytes: &[u8],
+    speed: u8,
+    staging_directory: &Path,
+    archive_id: &str,
+    index: usize,
+    cancel: &AtomicBool,
+    encode: &mut dyn FnMut(&Path, &Path, u8) -> Result<(), String>,
+) -> Result<Option<Vec<u8>>, String> {
+    if is_animated_png(bytes) {
+        return Ok(None);
+    }
+    let Ok(image) = decode_with_orientation(bytes) else {
+        return Ok(None);
     };
-    written.ok().map(|_| output)
+    let (files, mut input_file) = AvifTempFiles::create(staging_directory, archive_id, index)?;
+    image
+        .write_to(&mut input_file, ImageFormat::Png)
+        .map_err(|error| format!("AVIF変換用のPNGを作成できませんでした: {error}"))?;
+    input_file
+        .sync_all()
+        .map_err(|error| format!("AVIF変換用のPNGを書き込めませんでした: {error}"))?;
+    drop(input_file);
+
+    encode(&files.input, &files.output, speed)?;
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    let output_size = fs::metadata(&files.output)
+        .map_err(|error| format!("avifencの出力を確認できませんでした: {error}"))?
+        .len();
+    if output_size >= bytes.len() as u64 {
+        return Ok(None);
+    }
+    let output = fs::read(&files.output)
+        .map_err(|error| format!("avifencの出力を読み込めませんでした: {error}"))?;
+    if output.len() < 12 || &output[4..12] != b"ftypavif" {
+        return Err("avifencが有効なAVIF画像を出力しませんでした。".to_string());
+    }
+    Ok(Some(output))
+}
+
+pub fn run_avifenc(
+    app: &tauri::AppHandle,
+    input: &Path,
+    output: &Path,
+    speed: u8,
+) -> Result<(), String> {
+    let command = tauri_plugin_shell::ShellExt::shell(app)
+        .sidecar("avifenc")
+        .map_err(|error| format!("同梱avifencを起動できません: {error}"))?
+        .args([
+            "--codec",
+            "svt",
+            "--yuv",
+            "420",
+            "--qcolor",
+            &AVIF_QUALITY.to_string(),
+            "--qalpha",
+            &AVIF_QUALITY.to_string(),
+            "--speed",
+            &speed.to_string(),
+        ])
+        .args(["--no-overwrite"])
+        .arg(input)
+        .arg(output);
+    let status = tauri::async_runtime::block_on(command.status())
+        .map_err(|error| format!("avifencを実行できませんでした: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "avifencのAVIFエンコードに失敗しました（終了コード: {:?}）。",
+            status.code()
+        ))
+    }
 }
 
 fn new_entry(name: &str) -> sevenz_rust::SevenZArchiveEntry {
@@ -353,6 +445,7 @@ pub fn convert_archive(
     archive_id: &str,
     avif_speed: u8,
     cancel: &AtomicBool,
+    encode: &mut dyn FnMut(&Path, &Path, u8) -> Result<(), String>,
     progress: &mut dyn FnMut(ConvertProgress),
 ) -> Result<ConvertOutcome, String> {
     if !(1..=10).contains(&avif_speed) {
@@ -396,6 +489,7 @@ pub fn convert_archive(
         &staging,
         avif_speed,
         cancel,
+        encode,
         &mut reporter,
     );
     if !matches!(result, Ok(ConvertOutcome::Converted { .. })) {
@@ -415,6 +509,7 @@ fn run_conversion(
     staging: &Path,
     avif_speed: u8,
     cancel: &AtomicBool,
+    encode: &mut dyn FnMut(&Path, &Path, u8) -> Result<(), String>,
     reporter: &mut Reporter,
 ) -> Result<ConvertOutcome, String> {
     let mut state = ConvertProgress {
@@ -469,8 +564,16 @@ fn run_conversion(
                 .map_err(|error| {
                     format!("ZIP内の画像を展開できませんでした ({}): {error}", item.name)
                 })?;
-            match encode_avif(&bytes, avif_speed).filter(|avif| avif.len() < bytes.len()) {
-                Some(avif) => {
+            match encode_avif(
+                &bytes,
+                avif_speed,
+                &staging.parent().expect("staging path has a parent"),
+                archive_id,
+                item.index,
+                cancel,
+                encode,
+            )? {
+                Some(avif) if avif.len() < bytes.len() => {
                     let written = writer
                         .push_archive_entry(new_entry(avif_name), Some(Cursor::new(&avif)))
                         .map_err(write_error)?;
@@ -481,7 +584,7 @@ fn run_conversion(
                     });
                     converted += 1;
                 }
-                None => {
+                Some(_) | None => {
                     let written = writer
                         .push_archive_entry(new_entry(&item.name), Some(Cursor::new(&bytes)))
                         .map_err(write_error)?;
@@ -836,6 +939,11 @@ mod tests {
         (root, id)
     }
 
+    fn fake_avif_encoder(_input: &Path, output: &Path, _speed: u8) -> Result<(), String> {
+        fs::write(output, b"\0\0\0\x18ftypavif0000")
+            .map_err(|error| format!("test AVIF write failed: {error}"))
+    }
+
     #[test]
     fn converts_images_and_carries_over_metadata() {
         let note = vec![b'x'; 4000];
@@ -848,9 +956,15 @@ mod tests {
         ]);
         let cancel = AtomicBool::new(false);
         let mut phases = Vec::new();
-        let outcome = convert_archive(root.path(), &old_id, 6, &cancel, &mut |progress| {
-            phases.push(progress.phase)
-        })
+        let mut encode = fake_avif_encoder;
+        let outcome = convert_archive(
+            root.path(),
+            &old_id,
+            6,
+            &cancel,
+            &mut encode,
+            &mut |progress| phases.push(progress.phase),
+        )
         .expect("convert");
         let ConvertOutcome::Converted {
             archive_id,
@@ -947,7 +1061,9 @@ mod tests {
     fn cancellation_keeps_the_original() {
         let (root, id) = setup(&[("a.png", png_bytes(100, 100))]);
         let cancel = AtomicBool::new(true);
-        let outcome = convert_archive(root.path(), &id, 6, &cancel, &mut |_| {}).expect("convert");
+        let mut encode = fake_avif_encoder;
+        let outcome = convert_archive(root.path(), &id, 6, &cancel, &mut encode, &mut |_| {})
+            .expect("convert");
         assert_eq!(outcome, ConvertOutcome::Cancelled);
         assert!(root.path().join("archives/ab/sample.cbz").is_file());
         assert!(!root
@@ -957,13 +1073,33 @@ mod tests {
     }
 
     #[test]
+    fn encoder_failure_keeps_the_original_and_cleans_temporary_files() {
+        let (root, id) = setup(&[("a.png", png_bytes(100, 100))]);
+        let cancel = AtomicBool::new(false);
+        let mut encode = |_: &Path, _: &Path, _: u8| Err("sidecar failed".to_string());
+        let error = convert_archive(root.path(), &id, 6, &cancel, &mut encode, &mut |_| {})
+            .expect_err("encoder errors must abort the conversion");
+
+        assert!(error.contains("sidecar failed"));
+        assert!(root.path().join("archives/ab/sample.cbz").is_file());
+        assert_eq!(
+            fs::read_dir(root.path().join("archives/.staging"))
+                .expect("staging directory")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
     fn rejects_avif_speed_outside_supported_range() {
         let cancel = AtomicBool::new(false);
+        let mut encode = fake_avif_encoder;
         let error = convert_archive(
             Path::new("missing-repository"),
             "id",
             0,
             &cancel,
+            &mut encode,
             &mut |_| {},
         )
         .expect_err("invalid speed should be rejected");

@@ -215,16 +215,22 @@ pub async fn convert_archive(
     archive_id: String,
     avif_speed: u8,
     on_progress: tauri::ipc::Channel<crate::conversion::ConvertProgress>,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<crate::conversion::ConvertOutcome, String> {
     let cancel = state.convert_cancel.clone();
     cancel.store(false, std::sync::atomic::Ordering::SeqCst);
     with_exclusive_repository(&state, move |root| {
+        let mut encode =
+            |input: &std::path::Path, output: &std::path::Path, speed: u8| -> Result<(), String> {
+                crate::conversion::run_avifenc(&app, input, output, speed)
+            };
         crate::conversion::convert_archive(
             &root,
             &archive_id,
             avif_speed,
             &cancel,
+            &mut encode,
             &mut |progress| {
                 let _ = on_progress.send(progress);
             },

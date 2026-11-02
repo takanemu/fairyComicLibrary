@@ -4,7 +4,7 @@
   "version": "0.4.0",
   "identifier": "com.fairycomiclibrary.application",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run build:avifenc && npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
@@ -27,7 +27,7 @@
   "bundle": {
     "active": true,
     "targets": ["appimage"],
-    "externalBin": ["binaries/brave-comic-viewer"],
+    "externalBin": ["binaries/brave-comic-viewer", "binaries/avifenc"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

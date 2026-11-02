@@ -42,6 +42,8 @@ npm ci
 npm run tauri dev
 ```
 
+開発起動時に、SVT-AV1を有効にした`avifenc`サイドカーをビルドします。初回はCMake、Git、NASM、libpng、dav1dの開発パッケージとネットワーク接続が必要です。ビルド済みのサイドカーは`src-tauri/target/`に保持されます。
+
 フロントエンドの型チェックとビルドは次のコマンドで実行できます。
 
 ```bash
@@ -55,6 +57,7 @@ npm run build:release
 ```
 
 このコマンドは [Brave Comic Reader](https://github.com/takanemu/braveComicReader) の最新リリースから Linux x86_64 用ビューアーを取得し、チェックサムを検証してから AppImage をビルドします。GitHub へのネットワーク接続が必要です。
+また、SVT-AV1 v4.2.0 と libavif v1.4.2 から `avifenc` サイドカーをビルドしてAppImageへ同梱します。変換時はRust側で画像をデコードして向きを補正し、一時PNGをSVT-AV1が対応する4:2:0形式でAVIFへエンコードします。
 
 生成物は `src-tauri/target/release/bundle/appimage/` に出力されます。
 

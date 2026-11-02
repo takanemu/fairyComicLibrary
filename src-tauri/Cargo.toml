@@ -15,8 +15,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
-image = { version = "=0.25.8", default-features = false, features = ["avif", "avif-native", "bmp", "gif", "jpeg", "png", "rayon", "webp"] }
+image = { version = "=0.25.8", default-features = false, features = ["avif-native", "bmp", "gif", "jpeg", "png", "rayon", "webp"] }
 libc = "0.2"
 webp = { version = "0.3.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -29,6 +30,7 @@ zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 tauri-plugin-notification = "2"
 
 [dev-dependencies]
+image = { version = "=0.25.8", default-features = false, features = ["avif"] }
 tempfile = "3"
 
 [profile.dev.package."*"]

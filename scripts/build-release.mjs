@@ -83,6 +83,28 @@ async function downloadAsset(asset, expectedDigest) {
   await rename(temporaryPath, binaryPath);
 }
 
+function buildAvifenc() {
+  return new Promise((resolve, reject) => {
+    const child = spawn("bash", ["scripts/build-avifenc.sh"], {
+      cwd: projectDirectory,
+      env: { ...process.env, FORCE_BUILD_AVIFENC: "1" },
+      stdio: "inherit",
+    });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(
+          new Error(
+            `SVT-enabled avifenc build failed${signal ? ` (${signal})` : ` with exit code ${code}`}`,
+          ),
+        );
+      }
+    });
+  });
+}
+
 function buildRelease() {
   return new Promise((resolve, reject) => {
     const args = ["run", "tauri", "--", "build"];
@@ -127,6 +149,7 @@ try {
     await downloadAsset(asset, expectedDigest);
   }
 
+  await buildAvifenc();
   await buildRelease();
 } catch (error) {
   throw new Error("Release build preparation failed", { cause: error });

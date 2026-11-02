@@ -39,8 +39,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             build-essential \
+            cmake \
             curl \
             file \
+            git \
             libayatana-appindicator3-dev \
             libdav1d7 \
             libfuse2 \
@@ -48,6 +50,9 @@ jobs:
             libwebkit2gtk-4.1-dev \
             librsvg2-dev \
             libxdo-dev \
+            libpng-dev \
+            libpng-dev \
+            nasm \
             patchelf \
             libdav1d-dev \
             pkg-config \
