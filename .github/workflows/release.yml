@@ -51,7 +51,6 @@ jobs:
             librsvg2-dev \
             libxdo-dev \
             libpng-dev \
-            libpng-dev \
             nasm \
             patchelf \
             libdav1d-dev \
