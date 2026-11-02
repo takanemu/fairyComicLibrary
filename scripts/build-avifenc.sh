@@ -19,14 +19,16 @@ if [[ "${FORCE_BUILD_AVIFENC:-0}" != "1" && -x "$sidecar" ]]; then
 fi
 
 mkdir -p "$work_dir"
-if [[ ! -d "$work_dir/SVT-AV1/.git" ]]; then
-  git clone --depth 1 --branch "$svt_version" \
-    https://github.com/AOMediaCodec/SVT-AV1.git "$work_dir/SVT-AV1"
-fi
-if [[ ! -d "$work_dir/libavif/.git" ]]; then
-  git clone --depth 1 --branch "$libavif_version" \
-    https://github.com/AOMediaCodec/libavif.git "$work_dir/libavif"
-fi
+# キャッシュ復元などで一部だけ残ったディレクトリは作り直す
+clone_source() {
+  local name="$1" url="$2" version="$3"
+  if [[ ! -f "$work_dir/$name/CMakeLists.txt" ]]; then
+    rm -rf "$work_dir/$name"
+    git clone --depth 1 --branch "$version" "$url" "$work_dir/$name"
+  fi
+}
+clone_source SVT-AV1 https://github.com/AOMediaCodec/SVT-AV1.git "$svt_version"
+clone_source libavif https://github.com/AOMediaCodec/libavif.git "$libavif_version"
 
 install_prefix="$work_dir/install"
 cmake -S "$work_dir/SVT-AV1" -B "$work_dir/svt-build" \
