@@ -697,6 +697,14 @@ function App() {
               onCountChange={setArchiveCount}
               onError={setError}
               onMutated={bumpVersion}
+              activeTagIds={tagIds}
+              onToggleTagFilter={(id) =>
+                setTagIds((current) =>
+                  current.includes(id)
+                    ? current.filter((value) => value !== id)
+                    : [...current, id],
+                )
+              }
               query={query}
               version={version}
             />

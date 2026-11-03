@@ -23,6 +23,8 @@ type Props = {
   version: number;
   isFiltered: boolean;
   onMutated: () => void;
+  activeTagIds: number[];
+  onToggleTagFilter: (tagId: number) => void;
   onError: (message: string | null) => void;
   onCountChange: (count: number | null) => void;
   onConvertingChange: (busy: boolean) => void;
@@ -34,6 +36,8 @@ export function LibraryView({
   version,
   isFiltered,
   onMutated,
+  activeTagIds,
+  onToggleTagFilter,
   onError,
   onCountChange,
   onConvertingChange,
@@ -275,6 +279,14 @@ export function LibraryView({
       {selected.length === 1 && (
         <ArchiveDetail
           archive={selected[0]}
+          activeTagIds={activeTagIds}
+          onToggleTagFilter={onToggleTagFilter}
+          onOpen={() =>
+            mutateless(
+              () => openInViewer(selected[0].archiveId),
+              "ビューアー起動または読書履歴の更新に失敗しました",
+            )
+          }
           onAddTag={(category: TagCategory, name: string) =>
             mutate(
               () => addTag(selected[0].archiveId, category, name),

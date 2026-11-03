@@ -12,6 +12,9 @@ import {
 type Props = {
   archive: ArchiveSummary;
   onClose: () => void;
+  activeTagIds: number[];
+  onToggleTagFilter: (tagId: number) => void;
+  onOpen: () => void;
   onToggleFavorite: () => void;
   onAddTag: (category: TagCategory, name: string) => Promise<void>;
   onRemoveTag: (tagId: number) => Promise<void>;
@@ -24,6 +27,9 @@ type Props = {
 export function ArchiveDetail({
   archive,
   onClose,
+  activeTagIds,
+  onToggleTagFilter,
+  onOpen,
   onToggleFavorite,
   onAddTag,
   onRemoveTag,
@@ -141,8 +147,16 @@ export function ArchiveDetail({
       </dl>
 
       <button
+        className="mt-5 w-full rounded-lg bg-violet-500/80 px-3 py-2 text-xs font-medium text-white transition hover:bg-violet-500"
+        onClick={onOpen}
+        type="button"
+      >
+        アーカイブを開く
+      </button>
+
+      <button
         aria-pressed={archive.isFavorite}
-        className={`mt-5 rounded-lg border px-3 py-2 text-xs font-medium transition ${
+        className={`mt-2 rounded-lg border px-3 py-2 text-xs font-medium transition ${
           archive.isFavorite
             ? "border-rose-300/30 bg-rose-300/10 text-rose-200"
             : "border-white/[0.08] text-slate-300 hover:bg-white/[0.05]"
@@ -208,13 +222,25 @@ export function ArchiveDetail({
         <ul className="flex flex-wrap gap-1.5">
           {archive.tags.map((tag) => (
             <li
-              className="flex items-center gap-1 rounded-full border border-white/[0.08] bg-white/[0.04] py-1 pl-2.5 pr-1 text-[11px] text-slate-200"
+              className={`flex items-center gap-1 rounded-full border py-1 pr-1 text-[11px] text-slate-200 ${
+                activeTagIds.includes(tag.id)
+                  ? "border-violet-300/40 bg-violet-400/15"
+                  : "border-white/[0.08] bg-white/[0.04]"
+              }`}
               key={tag.id}
             >
-              <span className="text-slate-500">
-                {tagCategories.find((item) => item.value === tag.category)?.label}
-              </span>
-              {tag.name}
+              <button
+                aria-pressed={activeTagIds.includes(tag.id)}
+                className="flex items-center gap-1 rounded-full pl-2.5 hover:text-white"
+                onClick={() => onToggleTagFilter(tag.id)}
+                title="左ペインのタグ絞り込みを切り替え"
+                type="button"
+              >
+                <span className="text-slate-500">
+                  {tagCategories.find((item) => item.value === tag.category)?.label}
+                </span>
+                {tag.name}
+              </button>
               <button
                 aria-label={`タグ ${tag.name} を外す`}
                 className="grid size-5 place-items-center rounded-full text-slate-400 hover:bg-white/10"
