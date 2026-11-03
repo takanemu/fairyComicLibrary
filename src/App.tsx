@@ -594,11 +594,65 @@ function App() {
       </aside>
 
       <main className="min-w-0 flex-1">
-        <header className="flex h-12 items-center justify-between border-b border-white/5 px-10">
-          <div>
+        <header
+          className="flex h-12 cursor-move select-none items-center justify-between border-b border-white/5 px-10"
+          onMouseDown={(event) => {
+            if (
+              event.button !== 0 ||
+              (event.target instanceof Element && event.target.closest("button")) ||
+              !("__TAURI_INTERNALS__" in window)
+            ) {
+              return;
+            }
+            void getCurrentWindow()
+              .startDragging()
+              .catch((reason: unknown) =>
+                setError(`ウィンドウを移動できませんでした: ${String(reason)}`),
+              );
+          }}
+        >
+          <div className="flex h-full items-center">
             <h1 className="text-lg font-semibold tracking-tight">
               {navigation.find((item) => item.id === view)?.label}
             </h1>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              aria-label="最大化 / 元に戻す"
+              className="grid size-8 cursor-pointer place-items-center rounded-lg text-slate-400 transition hover:bg-white/[0.08] hover:text-white"
+              onClick={() => {
+                if (!("__TAURI_INTERNALS__" in window)) return;
+                void getCurrentWindow()
+                  .toggleMaximize()
+                  .catch((reason: unknown) =>
+                    setError(`ウィンドウを最大化できませんでした: ${String(reason)}`),
+                  );
+              }}
+              title="最大化 / 元に戻す"
+              type="button"
+            >
+              <svg aria-hidden="true" fill="none" height="14" viewBox="0 0 14 14" width="14">
+                <rect height="9" rx="1" stroke="currentColor" strokeWidth="1.4" width="9" x="2.5" y="2.5" />
+              </svg>
+            </button>
+            <button
+              aria-label="閉じる"
+              className="grid size-8 cursor-pointer place-items-center rounded-lg text-slate-400 transition hover:bg-rose-400/20 hover:text-rose-200"
+              onClick={() => {
+                if (!("__TAURI_INTERNALS__" in window)) return;
+                void getCurrentWindow()
+                  .close()
+                  .catch((reason: unknown) =>
+                    setError(`ウィンドウを閉じられませんでした: ${String(reason)}`),
+                  );
+              }}
+              title="閉じる"
+              type="button"
+            >
+              <svg aria-hidden="true" fill="none" height="14" viewBox="0 0 14 14" width="14">
+                <path d="m3 3 8 8M11 3l-8 8" stroke="currentColor" strokeLinecap="round" strokeWidth="1.5" />
+              </svg>
+            </button>
           </div>
         </header>
 
