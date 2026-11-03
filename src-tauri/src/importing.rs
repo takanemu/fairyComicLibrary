@@ -60,9 +60,9 @@ pub async fn import_archive(
         .and_then(|extension| extension.to_str())
         .map(str::to_ascii_lowercase)
         .ok_or_else(|| "対応する拡張子のアーカイブを選択してください。".to_string())?;
-    if !["7z", "zip", "rar", "cbz", "cbr"].contains(&extension.as_str()) {
+    if !["7z", "zip", "rar", "cbz", "cbr", "pdf"].contains(&extension.as_str()) {
         return Err(format!(
-            "対応していないファイル形式です: .{extension}（7z、zip、rar、cbz、cbrに対応）"
+            "対応していないファイル形式です: .{extension}（7z、zip、rar、cbz、cbr、pdfに対応）"
         ));
     }
 
@@ -565,6 +565,7 @@ async fn copy_staged_file(source: &Path, destination: &Path) -> Result<(), Strin
 
 fn validate_signature(extension: &str, header: &[u8]) -> Result<(), String> {
     let is_valid = match extension {
+        "pdf" => header.starts_with(b"%PDF-"),
         "7z" => header.starts_with(&[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]),
         "zip" | "cbz" => {
             header.starts_with(b"PK\x03\x04")
@@ -707,6 +708,7 @@ async fn remove_if_exists(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::parse_filename_tags;
+    use super::validate_signature;
     use super::{import_archive, ImportOutcome};
 
     #[test]
@@ -738,6 +740,12 @@ mod tests {
         assert_eq!(parse_filename_tags("()[作者]x.zip"), (None, Some("作者")));
         assert_eq!(parse_filename_tags("[]x.zip"), (None, None));
         assert_eq!(parse_filename_tags("(分類)[ ]x.zip"), (Some("分類"), None));
+    }
+
+    #[test]
+    fn validates_pdf_header() {
+        assert!(validate_signature("pdf", b"%PDF-1.7").is_ok());
+        assert!(validate_signature("pdf", b"not a PDF").is_err());
     }
 
     use crate::database;
@@ -804,6 +812,50 @@ mod tests {
         assert!(!source_path.exists());
         assert!(source_removed);
         assert!(repository.path().join(relative_path).exists());
+    }
+
+    #[tokio::test]
+    async fn imports_pdf_with_page_count_and_first_page_thumbnail() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        let source_directory = tempfile::tempdir().expect("temporary source");
+        initialize_repository(repository.path());
+        let source_path = source_directory.path().join("Comic.pdf");
+        std::fs::write(
+            &source_path,
+            crate::thumbnails::test_pdf_bytes(&["1 0 0", "0 0 1"]),
+        )
+        .expect("write source PDF");
+
+        let ImportOutcome::Imported {
+            archive_id,
+            relative_path,
+            source_removed,
+            ..
+        } = import_archive(repository.path(), &source_path)
+            .await
+            .expect("import PDF")
+        else {
+            panic!("expected PDF to be imported");
+        };
+        assert!(source_removed);
+        assert!(!source_path.exists());
+        assert!(repository.path().join(relative_path).exists());
+
+        let connection =
+            rusqlite::Connection::open(repository.path().join("database/library.sqlite3"))
+                .expect("open database");
+        let (format, page_count, thumbnail): (String, u64, String) = connection
+            .query_row(
+                "SELECT format, page_count, thumbnail_relative_path
+                 FROM archives WHERE archive_id = ?1",
+                [&archive_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read imported PDF");
+        assert_eq!(format, "pdf");
+        assert_eq!(page_count, 2);
+        crate::thumbnails::validate_existing_thumbnail(&repository.path().join(thumbnail))
+            .expect("validate imported PDF thumbnail");
     }
 
     #[tokio::test]

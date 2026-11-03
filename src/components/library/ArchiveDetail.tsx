@@ -40,6 +40,7 @@ export function ArchiveDetail({
 }: Props) {
   const [coverBusy, setCoverBusy] = useState(false);
   const [picking, setPicking] = useState(false);
+  const isPdf = archive.format === "pdf";
 
   async function regenerate(entryName: string | null) {
     setPicking(false);
@@ -176,9 +177,9 @@ export function ArchiveDetail({
         {unmanageBusy ? "移動中…" : "管理対象外にする（ダウンロードへ移動）"}
       </button>
 
-      <div className="mt-2 flex gap-2">
+      <div className={`mt-2 flex gap-2 ${isPdf ? "flex-col" : ""}`}>
         <button
-          className="flex-1 rounded-lg border border-white/[0.08] px-2 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:opacity-50"
+          className={`${isPdf ? "w-full" : "flex-1"} rounded-lg border border-white/[0.08] px-2 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:opacity-50`}
           disabled={coverBusy}
           onClick={() => void regenerate(null)}
           title="自動抽出の規則で表紙を作り直します"
@@ -186,15 +187,17 @@ export function ArchiveDetail({
         >
           {coverBusy ? "作成中…" : "表紙を再作成"}
         </button>
-        <button
-          className="flex-1 rounded-lg border border-white/[0.08] px-2 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:opacity-50"
-          disabled={coverBusy}
-          onClick={() => setPicking(true)}
-          title="アーカイブ内の画像から表紙を手動で選びます"
-          type="button"
-        >
-          表紙を選ぶ
-        </button>
+        {!isPdf && (
+          <button
+            className="flex-1 rounded-lg border border-white/[0.08] px-2 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:opacity-50"
+            disabled={coverBusy}
+            onClick={() => setPicking(true)}
+            title="アーカイブ内の画像から表紙を手動で選びます"
+            type="button"
+          >
+            表紙を選ぶ
+          </button>
+        )}
       </div>
       {isConvertible(archive.format) && (
         <button

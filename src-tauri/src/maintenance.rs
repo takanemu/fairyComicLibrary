@@ -929,6 +929,35 @@ mod tests {
     }
 
     #[test]
+    fn regenerates_missing_pdf_thumbnail_from_the_first_page() {
+        let repo = repository_with_archive();
+        let root = repo.path();
+        let id = "ab".repeat(32);
+        fs::write(
+            root.join("archives/ab/book.cbz"),
+            crate::thumbnails::test_pdf_bytes(&["1 0 0", "0 0 1"]),
+        )
+        .unwrap();
+        let connection = Connection::open(root.join("database/library.sqlite3")).unwrap();
+        connection
+            .execute(
+                "UPDATE archives SET format = 'pdf', thumbnail_relative_path = NULL",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let summary = super::regenerate_missing_thumbnails(root).unwrap();
+        assert_eq!((summary.regenerated, summary.failed), (1, 0));
+        crate::thumbnails::validate_existing_thumbnail(&root.join(format!(
+            "thumbnails/{}/{}.webp",
+            &id[..2],
+            id
+        )))
+        .unwrap();
+    }
+
+    #[test]
     fn backup_is_a_self_contained_repository() {
         let repo = repository_with_archive();
         let target = tempfile::tempdir().unwrap();

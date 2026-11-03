@@ -1,10 +1,14 @@
 use image::{imageops::FilterType, ImageReader, Limits};
+use pdfium_render::prelude::{PdfRenderConfig, Pdfium};
 use std::{
     fs::File,
     io::{Cursor, Read, Write},
     path::Path,
+    sync::OnceLock,
 };
 use zip::ZipArchive;
+
+static PDFIUM: OnceLock<Result<Pdfium, String>> = OnceLock::new();
 
 const MAX_IMAGE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
@@ -15,6 +19,8 @@ const MAX_THUMBNAIL_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const THUMBNAIL_MAX_WIDTH: u32 = 400;
 const THUMBNAIL_MAX_HEIGHT: u32 = 600;
 const THUMBNAIL_QUALITY: f32 = 80.0;
+const PDF_RENDER_MAX_WIDTH: i32 = 1200;
+const PDF_RENDER_MAX_HEIGHT: i32 = 1800;
 
 pub fn create_thumbnail(
     archive_path: &Path,
@@ -25,9 +31,60 @@ pub fn create_thumbnail(
         "zip" | "cbz" => extract_zip_cover(archive_path)?,
         "7z" => extract_7z_cover(archive_path)?,
         "rar" | "cbr" => extract_rar_cover(archive_path)?,
+        "pdf" => return create_pdf_thumbnail(archive_path, output_path),
         _ => return Err(format!("サムネイルを作成できない形式です: {format}")),
     };
     write_thumbnail(image_bytes, output_path)
+}
+
+fn pdfium() -> Result<&'static Pdfium, String> {
+    PDFIUM
+        .get_or_init(|| {
+            let bundled_path = std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(|directory| directory.join("libpdfium")));
+            let development_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("binaries/libpdfium-x86_64-unknown-linux-gnu");
+            let library_path = bundled_path
+                .filter(|path| path.is_file())
+                .or_else(|| development_path.is_file().then_some(development_path))
+                .ok_or_else(|| {
+                    "PDF処理ライブラリ（libpdfium）が見つかりません。アプリを再ビルドしてください。"
+                        .to_string()
+                })?;
+            let bindings = Pdfium::bind_to_library(&library_path)
+                .map_err(|error| format!("PDF処理ライブラリを読み込めませんでした: {error}"))?;
+            Ok(Pdfium::new(bindings))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+fn load_pdf(path: &Path) -> Result<pdfium_render::prelude::PdfDocument<'static>, String> {
+    pdfium()?
+        .load_pdf_from_file(path, None)
+        .map_err(|error| format!("PDFを開けませんでした: {error}"))
+}
+
+fn create_pdf_thumbnail(archive_path: &Path, output_path: &Path) -> Result<(), String> {
+    let pdfium = pdfium()?;
+    let document = pdfium
+        .load_pdf_from_file(archive_path, None)
+        .map_err(|error| format!("PDFを開けませんでした: {error}"))?;
+    let page = document
+        .pages()
+        .get(0)
+        .map_err(|error| format!("PDFの先頭ページを読み込めませんでした: {error}"))?;
+    let image = page
+        .render_with_config(
+            &PdfRenderConfig::new()
+                .set_target_width(PDF_RENDER_MAX_WIDTH)
+                .set_maximum_width(PDF_RENDER_MAX_WIDTH)
+                .set_maximum_height(PDF_RENDER_MAX_HEIGHT),
+        )
+        .and_then(|bitmap| bitmap.as_image())
+        .map_err(|error| format!("PDFの先頭ページを画像化できませんでした: {error}"))?;
+    write_thumbnail_image(image, output_path)
 }
 
 // 自動抽出の規則に合わない作品向けに、利用者が選んだエントリーから作る。
@@ -61,14 +118,21 @@ fn encode_webp(
     quality: f32,
 ) -> Result<Vec<u8>, String> {
     let image = decode_limited(image_bytes)?;
+    Ok(encode_webp_image(image, max_width, max_height, quality))
+}
+
+fn encode_webp_image(
+    image: image::DynamicImage,
+    max_width: u32,
+    max_height: u32,
+    quality: f32,
+) -> Vec<u8> {
     let resized = image
         .resize(max_width, max_height, FilterType::Lanczos3)
         .to_rgba8();
-    Ok(
-        webp::Encoder::from_rgba(resized.as_raw(), resized.width(), resized.height())
-            .encode(quality)
-            .to_vec(),
-    )
+    webp::Encoder::from_rgba(resized.as_raw(), resized.width(), resized.height())
+        .encode(quality)
+        .to_vec()
 }
 
 fn write_thumbnail(image_bytes: Vec<u8>, output_path: &Path) -> Result<(), String> {
@@ -78,6 +142,20 @@ fn write_thumbnail(image_bytes: Vec<u8>, output_path: &Path) -> Result<(), Strin
         THUMBNAIL_MAX_HEIGHT,
         THUMBNAIL_QUALITY,
     )?;
+    write_webp(encoded, output_path)
+}
+
+fn write_thumbnail_image(image: image::DynamicImage, output_path: &Path) -> Result<(), String> {
+    let encoded = encode_webp_image(
+        image,
+        THUMBNAIL_MAX_WIDTH,
+        THUMBNAIL_MAX_HEIGHT,
+        THUMBNAIL_QUALITY,
+    );
+    write_webp(encoded, output_path)
+}
+
+fn write_webp(encoded: Vec<u8>, output_path: &Path) -> Result<(), String> {
     let mut file = File::create(output_path)
         .map_err(|error| format!("サムネイルの一時ファイルを作成できませんでした: {error}"))?;
     file.write_all(&encoded)
@@ -107,6 +185,10 @@ fn is_page_image(name: &str) -> bool {
 
 pub fn count_pages(archive_path: &Path, format: &str) -> Result<u64, String> {
     let count = match format {
+        "pdf" => {
+            let document = load_pdf(archive_path)?;
+            document.pages().len() as u64
+        }
         "zip" | "cbz" => {
             let file = File::open(archive_path)
                 .map_err(|error| format!("ZIPアーカイブを開けませんでした: {error}"))?;
@@ -623,12 +705,62 @@ pub fn validate_existing_thumbnail(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(test)]
+pub(crate) fn test_pdf_bytes(colors: &[&str]) -> Vec<u8> {
+    let page_ids = (0..colors.len())
+        .map(|index| 3 + index * 2)
+        .collect::<Vec<_>>();
+    let kids = page_ids
+        .iter()
+        .map(|id| format!("{id} 0 R"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count {} >>", colors.len()),
+    ];
+    for (index, color) in colors.iter().enumerate() {
+        let page_id = page_ids[index];
+        let content_id = page_id + 1;
+        let content = format!("{color} rg\n0 0 100 150 re\nf\n");
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 150] /Resources << >> /Contents {content_id} 0 R >>"
+        ));
+        objects.push(format!(
+            "<< /Length {} >>\nstream\n{content}endstream",
+            content.len()
+        ));
+    }
+
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = vec![0];
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+    }
+
+    let xref_offset = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", offsets.len()).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in offsets.iter().skip(1) {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            offsets.len()
+        )
+        .as_bytes(),
+    );
+    pdf
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         cover_priority, create_thumbnail, migrate_avif_thumbnails, validate_existing_thumbnail,
         THUMBNAIL_MAX_HEIGHT, THUMBNAIL_MAX_WIDTH,
     };
-    use image::{ImageEncoder, RgbImage};
+    use image::{GenericImageView, ImageEncoder, RgbImage};
     use std::{
         fs::File,
         io::{Cursor, Write},
@@ -753,6 +885,27 @@ mod tests {
         assert_eq!(
             super::count_pages(&archive_path, "cbz").expect("count pages"),
             3
+        );
+    }
+
+    #[test]
+    fn counts_pdf_pages_and_uses_the_first_page_as_cover() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let pdf_path = directory.path().join("comic.pdf");
+        let thumbnail_path = directory.path().join("cover.webp");
+        std::fs::write(&pdf_path, super::test_pdf_bytes(&["1 0 0", "0 0 1"])).expect("write PDF");
+
+        assert_eq!(
+            super::count_pages(&pdf_path, "pdf").expect("count PDF pages"),
+            2
+        );
+        create_thumbnail(&pdf_path, "pdf", &thumbnail_path).expect("render first page");
+        validate_existing_thumbnail(&thumbnail_path).expect("validate WebP thumbnail");
+        let image = image::open(thumbnail_path).expect("decode WebP");
+        let center = image.get_pixel(image.width() / 2, image.height() / 2);
+        assert!(
+            center[0] > center[2],
+            "expected red first page, got {center:?}"
         );
     }
 
