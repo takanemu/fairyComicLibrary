@@ -1,0 +1,42 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Tauri: build debug backend",
+      "type": "shell",
+      "command": "npm run build:avifenc && npm run build:pdfium && cargo build --manifest-path src-tauri/Cargo.toml",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Vite: dev server",
+      "type": "shell",
+      "command": "npm run dev",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "vite",
+        "pattern": {
+          "regexp": "^$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*",
+          "endsPattern": ".*Local:.*"
+        }
+      }
+    },
+    {
+      "label": "Tauri: prepare debug",
+      "dependsOn": [
+        "Tauri: build debug backend",
+        "Vite: dev server"
+      ],
+      "dependsOrder": "sequence"
+    }
+  ]
+}

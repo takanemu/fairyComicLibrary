@@ -47,6 +47,10 @@ npm run tauri dev
 
 開発起動時に、SVT-AV1を有効にした`avifenc`サイドカーとPDFium 8125ライブラリを用意します。初回はCMake、Git、NASM、libpng、dav1dの開発パッケージとネットワーク接続が必要です。PDFiumはSHA-256を検証して取得します。ビルド済みのサイドカーとライブラリは`src-tauri/target/`および`src-tauri/binaries/`に保持されます。
 
+Rustバックエンドをデバッグするには、VS CodeにCodeLLDB拡張をインストールし、実行とデバッグで「Debug Tauri」を選んでF5を押します。必要なサイドカーとRustバックエンドのビルド、Vite開発サーバーの起動は自動で行われます。
+
+Snap版VS CodeでWebKitが`libpthread.so.0`のシンボルエラーを出す場合は、代わりに「Debug Tauri (VS Code Snap)」を選択してください。Ubuntu x86_64のシステム側のライブラリを優先して起動します。デバッグ終了後もViteタスクは動作するため、ポート1420が使用中の場合は、VS Codeの該当ターミナルでCtrl+Cを押して停止してください。
+
 フロントエンドの型チェックとビルドは次のコマンドで実行できます。
 
 ```bash

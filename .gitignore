@@ -11,4 +11,6 @@ src-tauri/binaries/
 .env
 .env.*
 !.env.example
-.vscode/
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json

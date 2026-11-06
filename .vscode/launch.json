@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Tauri",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/src-tauri/target/debug/fairy-comic-library",
+      "cwd": "${workspaceFolder}/src-tauri",
+      "preLaunchTask": "Tauri: prepare debug",
+      "args": []
+    },
+    {
+      "name": "Debug Tauri (VS Code Snap)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/src-tauri/target/debug/fairy-comic-library",
+      "cwd": "${workspaceFolder}/src-tauri",
+      "preLaunchTask": "Tauri: prepare debug",
+      "env": {
+        "LD_PRELOAD": "/usr/lib/x86_64-linux-gnu/libpthread.so.0"
+      },
+      "args": []
+    }
+  ]
+}
