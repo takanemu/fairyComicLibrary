@@ -59,6 +59,8 @@ npm run build
 
 ## リリースビルド
 
+アプリのバージョンは `package.json` の `version` を唯一の定義元とします。更新時は `npm version <新しい番号> --no-git-tag-version` を使うと、`package-lock.json` も同期されます。Tauri は設定から `package.json` を読み込みます。
+
 ```bash
 npm run build:release
 ```
@@ -70,7 +72,7 @@ npm run build:release
 
 ## GitHub Actions
 
-`v*` 形式のタグを push すると、GitHub Actions が Ubuntu 24.04 上でビューアーを取得・検証し、AppImage をビルドして GitHub Release に公開します。リリース前に、アプリのバージョンを更新して対応するタグを作成してください。
+`v*` 形式のタグを push すると、GitHub Actions が Ubuntu 24.04 上でビューアーを取得・検証し、AppImage をビルドして GitHub Release に公開します。リリース前に `package.json` のバージョンを更新し、その値に対応するタグ（例: `v0.6.0`）を作成してください。
 
 ## アプリ管理リポジトリ
 

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Fairy Comic Library",
-  "version": "0.6.0",
+  "version": "../package.json",
   "identifier": "com.fairycomiclibrary.application",
   "build": {
     "beforeDevCommand": "npm run build:avifenc && npm run build:pdfium && npm run dev",
