@@ -94,8 +94,17 @@ export const setFavorite = (archiveId: string, isFavorite: boolean) =>
 export const addTag = (archiveId: string, category: TagCategory, name: string) =>
   invoke<Tag>("add_tag", { archiveId, category, name });
 
+export const addTagToArchives = (
+  archiveIds: string[],
+  category: TagCategory,
+  name: string,
+) => invoke<Tag>("add_tag_to_archives", { archiveIds, category, name });
+
 export const removeTag = (archiveId: string, tagId: number) =>
   invoke<void>("remove_tag", { archiveId, tagId });
+
+export const removeTagFromArchives = (archiveIds: string[], tagId: number) =>
+  invoke<void>("remove_tag_from_archives", { archiveIds, tagId });
 
 export type UnmanageSummary = {
   moved: number;

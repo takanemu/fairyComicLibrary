@@ -100,12 +100,31 @@ pub fn add_tag(
 }
 
 #[tauri::command(async)]
+pub fn add_tag_to_archives(
+    archive_ids: Vec<String>,
+    category: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<library::TagSummary, String> {
+    library::add_tag_to_archives(&current_repository(&state)?, &archive_ids, &category, &name)
+}
+
+#[tauri::command(async)]
 pub fn remove_tag(
     archive_id: String,
     tag_id: i64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     library::remove_tag(&current_repository(&state)?, &archive_id, tag_id)
+}
+
+#[tauri::command(async)]
+pub fn remove_tag_from_archives(
+    archive_ids: Vec<String>,
+    tag_id: i64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    library::remove_tag_from_archives(&current_repository(&state)?, &archive_ids, tag_id)
 }
 
 #[tauri::command]

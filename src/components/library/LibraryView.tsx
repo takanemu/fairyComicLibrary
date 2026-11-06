@@ -5,9 +5,11 @@ import {
   ArchiveSummary,
   TagCategory,
   addTag,
+  addTagToArchives,
   listArchives,
   openInViewer,
   removeTag,
+  removeTagFromArchives,
   regenerateThumbnail,
   isConvertible,
   setFavorite,
@@ -161,10 +163,33 @@ export function LibraryView({
     }
   };
 
+  const runBulkTag = async (
+    action: () => Promise<unknown>,
+    failure: string,
+  ): Promise<boolean> => {
+    if (bulkBusy) return false;
+    setBulkBusy(true);
+    try {
+      await action();
+      onMutated();
+      onError(null);
+      return true;
+    } catch (reason) {
+      onError(`${failure}: ${String(reason)}`);
+      return false;
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const addTagToSelection = async (category: TagCategory, name: string) => {
-    return runBulk(
-      selected,
-      (archive) => addTag(archive.archiveId, category, name),
+    return runBulkTag(
+      () =>
+        addTagToArchives(
+          selected.map((archive) => archive.archiveId),
+          category,
+          name,
+        ),
       "選択作品へのタグ追加に失敗しました",
     );
   };
@@ -173,9 +198,12 @@ export function LibraryView({
     const targets = selected.filter((archive) =>
       archive.tags.some((tag) => tag.id === tagId),
     );
-    void runBulk(
-      targets,
-      (archive) => removeTag(archive.archiveId, tagId),
+    void runBulkTag(
+      () =>
+        removeTagFromArchives(
+          targets.map((archive) => archive.archiveId),
+          tagId,
+        ),
       "選択作品からタグを外せませんでした",
     );
   };

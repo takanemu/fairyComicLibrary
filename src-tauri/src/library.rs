@@ -1,6 +1,9 @@
-use rusqlite::{named_params, params, Connection};
+use rusqlite::{named_params, params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 const TAG_CATEGORIES: [&str; 3] = ["author", "series", "classification"];
 const MAX_TAG_NAME_CHARS: usize = 100;
@@ -353,6 +356,15 @@ pub fn add_tag(
     category: &str,
     name: &str,
 ) -> Result<TagSummary, String> {
+    add_tag_to_archives(repository_root, &[archive_id.to_string()], category, name)
+}
+
+pub fn add_tag_to_archives(
+    repository_root: &Path,
+    archive_ids: &[String],
+    category: &str,
+    name: &str,
+) -> Result<TagSummary, String> {
     if !TAG_CATEGORIES.contains(&category) {
         return Err("タグの分類が不正です。".to_string());
     }
@@ -365,20 +377,32 @@ pub fn add_tag(
             "タグ名は{MAX_TAG_NAME_CHARS}文字以内にしてください。"
         ));
     }
+    let archive_ids = archive_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    if archive_ids.is_empty() {
+        return Err("タグを付ける作品が選択されていません。".to_string());
+    }
 
     let mut connection = open(repository_root)?;
     let transaction = connection
         .transaction()
         .map_err(|error| format!("タグの更新を開始できませんでした: {error}"))?;
-    let archive_exists = transaction
-        .query_row(
-            "SELECT 1 FROM archives WHERE archive_id = ?1",
-            [archive_id],
-            |_| Ok(()),
-        )
-        .is_ok();
-    if !archive_exists {
-        return Err("対象のアーカイブが見つかりません。".to_string());
+    {
+        let mut statement = transaction
+            .prepare_cached("SELECT 1 FROM archives WHERE archive_id = ?1")
+            .map_err(|error| format!("対象のアーカイブを確認できませんでした: {error}"))?;
+        for archive_id in &archive_ids {
+            let exists = statement
+                .query_row([archive_id], |_| Ok(()))
+                .optional()
+                .map_err(|error| format!("対象のアーカイブを確認できませんでした: {error}"))?
+                .is_some();
+            if !exists {
+                return Err("対象のアーカイブが見つかりません。".to_string());
+            }
+        }
     }
     transaction
         .execute(
@@ -393,12 +417,18 @@ pub fn add_tag(
             |row| row.get(0),
         )
         .map_err(|error| format!("タグを確認できませんでした: {error}"))?;
-    transaction
-        .execute(
-            "INSERT OR IGNORE INTO archive_tags (archive_id, tag_id) VALUES (?1, ?2)",
-            params![archive_id, id],
-        )
-        .map_err(|error| format!("タグを付けられませんでした: {error}"))?;
+    {
+        let mut statement = transaction
+            .prepare_cached(
+                "INSERT OR IGNORE INTO archive_tags (archive_id, tag_id) VALUES (?1, ?2)",
+            )
+            .map_err(|error| format!("タグを付けられませんでした: {error}"))?;
+        for archive_id in archive_ids {
+            statement
+                .execute(params![archive_id, id])
+                .map_err(|error| format!("タグを付けられませんでした: {error}"))?;
+        }
+    }
     transaction
         .commit()
         .map_err(|error| format!("タグの更新を確定できませんでした: {error}"))?;
@@ -411,16 +441,36 @@ pub fn add_tag(
 
 // どのアーカイブにも付いていないタグは、フィルター一覧が散らからないよう同時に削除する。
 pub fn remove_tag(repository_root: &Path, archive_id: &str, tag_id: i64) -> Result<(), String> {
+    remove_tag_from_archives(repository_root, &[archive_id.to_string()], tag_id)
+}
+
+pub fn remove_tag_from_archives(
+    repository_root: &Path,
+    archive_ids: &[String],
+    tag_id: i64,
+) -> Result<(), String> {
+    let archive_ids = archive_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    if archive_ids.is_empty() {
+        return Err("タグを外す作品が選択されていません。".to_string());
+    }
+
     let mut connection = open(repository_root)?;
     let transaction = connection
         .transaction()
         .map_err(|error| format!("タグの更新を開始できませんでした: {error}"))?;
-    transaction
-        .execute(
-            "DELETE FROM archive_tags WHERE archive_id = ?1 AND tag_id = ?2",
-            params![archive_id, tag_id],
-        )
-        .map_err(|error| format!("タグを外せませんでした: {error}"))?;
+    {
+        let mut statement = transaction
+            .prepare_cached("DELETE FROM archive_tags WHERE archive_id = ?1 AND tag_id = ?2")
+            .map_err(|error| format!("タグを外せませんでした: {error}"))?;
+        for archive_id in archive_ids {
+            statement
+                .execute(params![archive_id, tag_id])
+                .map_err(|error| format!("タグを外せませんでした: {error}"))?;
+        }
+    }
     transaction
         .execute(
             "DELETE FROM tags WHERE id = ?1
@@ -436,8 +486,8 @@ pub fn remove_tag(repository_root: &Path, archive_id: &str, tag_id: i64) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        add_tag, list_archives, list_tags, remove_tag, set_favorite, ArchiveQuery, SortBy,
-        SortDirection,
+        add_tag, add_tag_to_archives, list_archives, list_tags, remove_tag,
+        remove_tag_from_archives, set_favorite, ArchiveQuery, SortBy, SortDirection,
     };
     use crate::database;
     use rusqlite::{params, Connection};
@@ -685,6 +735,30 @@ mod tests {
         assert_eq!(list_tags(repository.path()).expect("tags").len(), 1);
         remove_tag(repository.path(), &id(1), tag.id).expect("remove from second");
         assert!(list_tags(repository.path()).expect("tags").is_empty());
+    }
+
+    #[test]
+    fn adds_and_removes_a_tag_for_multiple_archives_in_one_operation() {
+        let repository = repository_with_archives();
+        let ids = vec![id(0), id(1), id(0)];
+        let tag = add_tag_to_archives(repository.path(), &ids, "series", "Fairy").expect("add tag");
+
+        let tags = list_tags(repository.path()).expect("list tags");
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].id, tag.id);
+        assert_eq!(tags[0].archive_count, 2);
+
+        remove_tag_from_archives(repository.path(), &ids, tag.id).expect("remove tag");
+        assert!(list_tags(repository.path()).expect("list tags").is_empty());
+    }
+
+    #[test]
+    fn adding_a_tag_to_multiple_archives_rolls_back_if_any_archive_is_missing() {
+        let repository = repository_with_archives();
+        let ids = vec![id(0), "f".repeat(64)];
+
+        assert!(add_tag_to_archives(repository.path(), &ids, "series", "Fairy").is_err());
+        assert!(list_tags(repository.path()).expect("list tags").is_empty());
     }
 
     #[test]
