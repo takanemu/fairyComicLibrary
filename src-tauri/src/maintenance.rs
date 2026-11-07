@@ -177,11 +177,12 @@ fn cleanup_file_note(path: &Path, label: &str) -> String {
     }
 }
 
-pub fn archive_path(root: &Path, archive_id: &str) -> Result<PathBuf, String> {
+pub fn archive_for_open(root: &Path, archive_id: &str) -> Result<(PathBuf, String), String> {
     let connection = Connection::open(root.join(DATABASE))
         .map_err(|error| format!("SQLiteデータベースを開けませんでした: {error}"))?;
     let record = archive_record(&connection, archive_id)?;
-    archive_file(root, &record)
+    let path = archive_file(root, &record)?;
+    Ok((path, record.format))
 }
 
 pub fn list_cover_candidates(root: &Path, archive_id: &str) -> Result<Vec<String>, String> {

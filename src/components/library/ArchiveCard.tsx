@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArchiveSummary, thumbnailUrl } from "../../lib/library";
+import { ArchiveSummary, isEbook, thumbnailUrl } from "../../lib/library";
 
 type Props = {
   archive: ArchiveSummary;
@@ -96,7 +96,11 @@ export function ArchiveCard({ archive, selected, onSelect, onOpen, onToggleFavor
             {displayFilename}
           </p>
           <p className="mt-1 text-[10px] uppercase tracking-wide text-slate-500">
-            {archive.pageCount === null ? "ページ数不明" : `${archive.pageCount} ページ`}
+            {isEbook(archive.format)
+              ? "電子書籍"
+              : archive.pageCount === null
+                ? "ページ数不明"
+                : `${archive.pageCount} ページ`}
           </p>
         </div>
       </button>

@@ -441,7 +441,7 @@ function App() {
         filters: [
           {
             name: "アーカイブ",
-            extensions: ["7z", "zip", "rar", "cbz", "cbr", "pdf"],
+            extensions: ["7z", "zip", "rar", "cbz", "cbr", "pdf", "epub", "azw3"],
           },
         ],
       });

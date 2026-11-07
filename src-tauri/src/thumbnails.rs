@@ -1,8 +1,9 @@
 use image::{imageops::FilterType, ImageReader, Limits};
 use pdfium_render::prelude::{PdfRenderConfig, Pdfium};
+use quick_xml::{events::Event, Reader as XmlReader};
 use std::{
     fs::File,
-    io::{Cursor, Read, Write},
+    io::{Cursor, Read, Seek, SeekFrom, Write},
     path::Path,
     sync::OnceLock,
 };
@@ -32,6 +33,8 @@ pub fn create_thumbnail(
         "7z" => extract_7z_cover(archive_path)?,
         "rar" | "cbr" => extract_rar_cover(archive_path)?,
         "pdf" => return create_pdf_thumbnail(archive_path, output_path),
+        "epub" => extract_epub_cover(archive_path)?,
+        "azw3" => extract_azw3_cover(archive_path)?,
         _ => return Err(format!("サムネイルを作成できない形式です: {format}")),
     };
     write_thumbnail(image_bytes, output_path)
@@ -183,11 +186,11 @@ fn is_page_image(name: &str) -> bool {
     ) && !name.split(['/', '\\']).any(|part| part == "..")
 }
 
-pub fn count_pages(archive_path: &Path, format: &str) -> Result<u64, String> {
+pub fn count_pages(archive_path: &Path, format: &str) -> Result<Option<u64>, String> {
     let count = match format {
         "pdf" => {
             let document = load_pdf(archive_path)?;
-            document.pages().len() as u64
+            Some(document.pages().len() as u64)
         }
         "zip" | "cbz" => {
             let file = File::open(archive_path)
@@ -199,10 +202,12 @@ pub fn count_pages(archive_path: &Path, format: &str) -> Result<u64, String> {
                     "アーカイブのエントリー数が上限（{MAX_ARCHIVE_ENTRIES}件）を超えています。"
                 ));
             }
-            archive
-                .file_names()
-                .filter(|name| !name.ends_with('/') && is_page_image(name))
-                .count() as u64
+            Some(
+                archive
+                    .file_names()
+                    .filter(|name| !name.ends_with('/') && is_page_image(name))
+                    .count() as u64,
+            )
         }
         "7z" => {
             let reader =
@@ -214,10 +219,12 @@ pub fn count_pages(archive_path: &Path, format: &str) -> Result<u64, String> {
                     "アーカイブのエントリー数が上限（{MAX_ARCHIVE_ENTRIES}件）を超えています。"
                 ));
             }
-            entries
-                .iter()
-                .filter(|entry| !entry.is_directory() && is_page_image(entry.name()))
-                .count() as u64
+            Some(
+                entries
+                    .iter()
+                    .filter(|entry| !entry.is_directory() && is_page_image(entry.name()))
+                    .count() as u64,
+            )
         }
         "rar" | "cbr" => {
             let mut archive = unrar::Archive::new(archive_path)
@@ -244,11 +251,272 @@ pub fn count_pages(archive_path: &Path, format: &str) -> Result<u64, String> {
                     .skip()
                     .map_err(|error| format!("RAR内のファイルを読み飛ばせませんでした: {error}"))?;
             }
-            count
+            Some(count)
         }
+        "epub" | "azw3" => None,
         _ => return Err(unsupported(format)),
     };
     Ok(count)
+}
+
+const MAX_EBOOK_METADATA_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_EPUB_CONTAINER_BYTES: u64 = 1024 * 1024;
+
+fn read_zip_member(
+    archive: &mut ZipArchive<File>,
+    name: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
+    let entry = archive
+        .by_name(name)
+        .map_err(|error| format!("EPUB内の {name} を開けませんでした: {error}"))?;
+    if entry.size() == 0 || entry.size() > max_bytes {
+        return Err(format!("EPUB内の {name} が空、または大きすぎます。"));
+    }
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("EPUB内の {name} を読み込めませんでした: {error}"))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(format!("EPUB内の {name} が大きすぎます。"));
+    }
+    Ok(bytes)
+}
+
+fn xml_attribute(
+    element: &quick_xml::events::BytesStart<'_>,
+    key: &str,
+) -> Result<Option<String>, String> {
+    for attribute in element.attributes().with_checks(false) {
+        let attribute =
+            attribute.map_err(|error| format!("EPUBのメタデータを解析できません: {error}"))?;
+        if attribute.key.local_name().as_ref() == key.as_bytes() {
+            return attribute
+                .unescape_value()
+                .map(|value| Some(value.into_owned()))
+                .map_err(|error| format!("EPUBのメタデータを解析できません: {error}"));
+        }
+    }
+    Ok(None)
+}
+
+fn epub_package_path(container: &str) -> Result<String, String> {
+    let mut reader = XmlReader::from_str(container);
+    reader.config_mut().trim_text(true);
+    loop {
+        match reader
+            .read_event()
+            .map_err(|error| format!("EPUBのcontainer.xmlを解析できません: {error}"))?
+        {
+            Event::Start(element) | Event::Empty(element)
+                if element.local_name().as_ref() == b"rootfile" =>
+            {
+                if let Some(path) = xml_attribute(&element, "full-path")? {
+                    if !path.is_empty() {
+                        return Ok(path);
+                    }
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Err("EPUBのcontainer.xmlにOPFファイルの指定がありません。".to_string())
+}
+
+fn epub_cover_candidates(package: &str) -> Result<Vec<String>, String> {
+    let mut reader = XmlReader::from_str(package);
+    reader.config_mut().trim_text(true);
+    let mut cover_id = None;
+    let mut manifest = Vec::new();
+    loop {
+        match reader
+            .read_event()
+            .map_err(|error| format!("EPUBのOPFメタデータを解析できません: {error}"))?
+        {
+            Event::Start(element) | Event::Empty(element)
+                if element.local_name().as_ref() == b"meta" =>
+            {
+                let name = xml_attribute(&element, "name")?;
+                let content = xml_attribute(&element, "content")?;
+                if name.as_deref() == Some("cover") {
+                    cover_id = content;
+                }
+            }
+            Event::Start(element) | Event::Empty(element)
+                if element.local_name().as_ref() == b"item" =>
+            {
+                manifest.push((
+                    xml_attribute(&element, "id")?,
+                    xml_attribute(&element, "href")?,
+                    xml_attribute(&element, "properties")?,
+                ));
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(cover_id) = cover_id {
+        if let Some((_, Some(href), _)) = manifest
+            .iter()
+            .find(|(id, _, _)| id.as_deref() == Some(cover_id.as_str()))
+        {
+            candidates.push(href.clone());
+        }
+    }
+    candidates.extend(manifest.into_iter().filter_map(|(_, href, properties)| {
+        properties
+            .as_deref()
+            .is_some_and(|properties| {
+                properties
+                    .split_ascii_whitespace()
+                    .any(|p| p == "cover-image")
+            })
+            .then_some(href)
+            .flatten()
+    }));
+    Ok(candidates)
+}
+
+fn decode_epub_href(href: &str) -> Result<String, String> {
+    let href = href.split(['#', '?']).next().unwrap_or_default();
+    let bytes = href.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = bytes.get(index + 1..index + 3).ok_or_else(|| {
+                "EPUBのカバー画像パスに不正なURLエスケープがあります。".to_string()
+            })?;
+            let value = std::str::from_utf8(hex)
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                .ok_or_else(|| {
+                    "EPUBのカバー画像パスに不正なURLエスケープがあります。".to_string()
+                })?;
+            decoded.push(value);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded)
+        .map_err(|_| "EPUBのカバー画像パスがUTF-8ではありません。".to_string())
+}
+
+fn resolve_epub_href(package_path: &str, href: &str) -> Result<String, String> {
+    let href = decode_epub_href(href)?;
+    if href.starts_with('/') || href.contains('\\') {
+        return Err("EPUBのカバー画像パスが不正です。".to_string());
+    }
+    let mut components = package_path
+        .rsplit_once('/')
+        .map(|(parent, _)| parent.split('/').collect::<Vec<_>>())
+        .unwrap_or_default();
+    for component in href.split('/') {
+        match component {
+            "" | "." => {}
+            ".." if components.pop().is_none() => {
+                return Err("EPUBのカバー画像パスがルート外を参照しています。".to_string())
+            }
+            ".." => {}
+            part => components.push(part),
+        }
+    }
+    if components.is_empty() {
+        return Err("EPUBのカバー画像パスが空です。".to_string());
+    }
+    Ok(components.join("/"))
+}
+
+fn extract_epub_cover(archive_path: &Path) -> Result<Vec<u8>, String> {
+    let file =
+        File::open(archive_path).map_err(|error| format!("EPUBを開けませんでした: {error}"))?;
+    let mut archive = ZipArchive::new(file).map_err(|error| format!("EPUBが不正です: {error}"))?;
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(format!(
+            "EPUBのエントリー数が上限（{MAX_ARCHIVE_ENTRIES}件）を超えています。"
+        ));
+    }
+    let container = read_zip_member(
+        &mut archive,
+        "META-INF/container.xml",
+        MAX_EPUB_CONTAINER_BYTES,
+    )?;
+    let container = std::str::from_utf8(&container)
+        .map_err(|error| format!("EPUBのcontainer.xmlがUTF-8ではありません: {error}"))?;
+    let package_path = epub_package_path(container)?;
+    let package = read_zip_member(&mut archive, &package_path, MAX_EBOOK_METADATA_BYTES)?;
+    let package = std::str::from_utf8(&package)
+        .map_err(|error| format!("EPUBのOPFファイルがUTF-8ではありません: {error}"))?;
+    let candidates = epub_cover_candidates(package)?;
+
+    let mut last_error = None;
+    for candidate in candidates {
+        let relative = resolve_epub_href(&package_path, &candidate)?;
+        match read_zip_member(&mut archive, &relative, MAX_IMAGE_ENTRY_BYTES) {
+            Ok(bytes) => match validate_image(&bytes) {
+                Ok(()) => return Ok(bytes),
+                Err(error) => last_error = Some(error),
+            },
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| "EPUBのメタデータにカバー画像が指定されていません。".to_string()))
+}
+
+fn extract_azw3_cover(archive_path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = mobi::headers::MobiMetadata::from_path(archive_path)
+        .map_err(|error| format!("AZW3のメタデータを読み込めませんでした: {error}"))?;
+    let cover_index = metadata
+        .exth
+        .get_record_position(201)
+        .and_then(|values| values.first())
+        .and_then(|bytes| <[u8; 4]>::try_from(bytes.as_slice()).ok())
+        .map(u32::from_be_bytes)
+        .and_then(|offset| (metadata.mobi.first_image_index as usize).checked_add(offset as usize));
+    let index = cover_index
+        .ok_or_else(|| "AZW3のメタデータにカバー画像の指定がありません。".to_string())?;
+    let record = metadata
+        .records
+        .records
+        .get(index)
+        .ok_or_else(|| "AZW3のカバー画像レコードが見つかりません。".to_string())?;
+    let file_length = std::fs::metadata(archive_path)
+        .map_err(|error| format!("AZW3のファイル情報を取得できませんでした: {error}"))?
+        .len();
+    let start = u64::from(record.offset);
+    let end = metadata
+        .records
+        .records
+        .get(index + 1)
+        .map(|next| u64::from(next.offset))
+        .unwrap_or(file_length);
+    let end = if index + 1 < metadata.records.records.len() {
+        end.saturating_sub(u64::from(metadata.records.extra_bytes()))
+    } else {
+        end
+    };
+    let size = end.saturating_sub(start);
+    if size == 0 || size > MAX_IMAGE_ENTRY_BYTES {
+        return Err("AZW3のカバー画像が空、または大きすぎます。".to_string());
+    }
+
+    let mut file =
+        File::open(archive_path).map_err(|error| format!("AZW3を開けませんでした: {error}"))?;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| format!("AZW3のカバー画像へ移動できませんでした: {error}"))?;
+    let mut bytes = vec![0; size as usize];
+    file.read_exact(&mut bytes)
+        .map_err(|error| format!("AZW3のカバー画像を読み込めませんでした: {error}"))?;
+    validate_image(&bytes)?;
+    Ok(bytes)
 }
 
 // 表紙の選択肢として、アーカイブ内の画像エントリー名を返す（展開はしない）。
@@ -843,6 +1111,59 @@ mod tests {
     }
 
     #[test]
+    fn uses_epub_cover_metadata_and_resolves_encoded_relative_paths() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let archive_path = directory.path().join("book.epub");
+        let thumbnail_path = directory.path().join("cover.webp");
+        let image = png_bytes(64, 96);
+        write_zip(
+            &archive_path,
+            &[
+                (
+                    "META-INF/container.xml",
+                    br#"<?xml version="1.0"?><container><rootfiles><rootfile full-path="OPS/book.opf"/></rootfiles></container>"#,
+                ),
+                (
+                    "OPS/book.opf",
+                    br#"<package><metadata><meta name="cover" content="main-cover"/></metadata><manifest><item id="main-cover" href="images/cover%20image.png" media-type="image/png"/></manifest></package>"#,
+                ),
+                ("OPS/images/cover image.png", &image),
+            ],
+        );
+
+        create_thumbnail(&archive_path, "epub", &thumbnail_path).expect("extract EPUB cover");
+        validate_existing_thumbnail(&thumbnail_path).expect("validate EPUB thumbnail");
+        assert_eq!(
+            super::count_pages(&archive_path, "epub").expect("no page count"),
+            None
+        );
+    }
+
+    #[test]
+    fn uses_epub3_cover_image_property() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let archive_path = directory.path().join("book.epub");
+        let thumbnail_path = directory.path().join("cover.webp");
+        write_zip(
+            &archive_path,
+            &[
+                (
+                    "META-INF/container.xml",
+                    br#"<container><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#,
+                ),
+                (
+                    "book.opf",
+                    br#"<package><manifest><item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/></manifest></package>"#,
+                ),
+                ("cover.png", &png_bytes(32, 48)),
+            ],
+        );
+
+        create_thumbnail(&archive_path, "epub", &thumbnail_path).expect("extract EPUB3 cover");
+        validate_existing_thumbnail(&thumbnail_path).expect("validate EPUB3 thumbnail");
+    }
+
+    #[test]
     fn lists_and_decodes_avif_covers() {
         let image = RgbImage::from_pixel(64, 96, image::Rgb([30, 160, 90]));
         let mut avif = Vec::new();
@@ -884,7 +1205,7 @@ mod tests {
 
         assert_eq!(
             super::count_pages(&archive_path, "cbz").expect("count pages"),
-            3
+            Some(3)
         );
     }
 
@@ -897,7 +1218,7 @@ mod tests {
 
         assert_eq!(
             super::count_pages(&pdf_path, "pdf").expect("count PDF pages"),
-            2
+            Some(2)
         );
         create_thumbnail(&pdf_path, "pdf", &thumbnail_path).expect("render first page");
         validate_existing_thumbnail(&thumbnail_path).expect("validate WebP thumbnail");

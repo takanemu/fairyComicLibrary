@@ -60,9 +60,9 @@ pub async fn import_archive(
         .and_then(|extension| extension.to_str())
         .map(str::to_ascii_lowercase)
         .ok_or_else(|| "対応する拡張子のアーカイブを選択してください。".to_string())?;
-    if !["7z", "zip", "rar", "cbz", "cbr", "pdf"].contains(&extension.as_str()) {
+    if !["7z", "zip", "rar", "cbz", "cbr", "pdf", "epub", "azw3"].contains(&extension.as_str()) {
         return Err(format!(
-            "対応していないファイル形式です: .{extension}（7z、zip、rar、cbz、cbr、pdfに対応）"
+            "対応していないファイル形式です: .{extension}（7z、zip、rar、cbz、cbr、pdf、epub、azw3に対応）"
         ));
     }
 
@@ -80,11 +80,12 @@ pub async fn import_archive(
     let mut header_file = source_lock
         .try_clone()
         .map_err(|error| format!("アーカイブのヘッダーを読み込めませんでした: {error}"))?;
-    let mut header = [0_u8; 8];
+    let mut header = [0_u8; 80];
+    let header_length = if extension == "azw3" { 80 } else { 8 };
     header_file
-        .read_exact(&mut header)
+        .read_exact(&mut header[..header_length])
         .map_err(|error| format!("アーカイブのヘッダーを読み込めませんでした: {error}"))?;
-    validate_signature(&extension, &header)?;
+    validate_signature(&extension, &header[..header_length])?;
 
     let hash_file = source_lock
         .try_clone()
@@ -575,6 +576,12 @@ fn validate_signature(extension: &str, header: &[u8]) -> Result<(), String> {
         "rar" | "cbr" => {
             header.starts_with(b"Rar!\x1a\x07\x00") || header.starts_with(b"Rar!\x1a\x07\x01\x00")
         }
+        "epub" => {
+            header.starts_with(b"PK\x03\x04")
+                || header.starts_with(b"PK\x05\x06")
+                || header.starts_with(b"PK\x07\x08")
+        }
+        "azw3" => header.get(60..68) == Some(b"BOOKMOBI"),
         _ => false,
     };
 
@@ -608,11 +615,13 @@ fn register_archive(
     thumbnail_relative_path: &str,
     format: &str,
     file_size: u64,
-    page_count: u64,
+    page_count: Option<u64>,
 ) -> Result<(), String> {
     let file_size = i64::try_from(file_size)
         .map_err(|_| "アーカイブのサイズがDBで扱える範囲を超えています。".to_string())?;
-    let page_count = i64::try_from(page_count)
+    let page_count = page_count
+        .map(i64::try_from)
+        .transpose()
         .map_err(|_| "ページ数がDBで扱える範囲を超えています。".to_string())?;
     let mut connection = Connection::open(database_path)
         .map_err(|error| format!("ライブラリDBを開けませんでした: {error}"))?;
@@ -748,6 +757,16 @@ mod tests {
         assert!(validate_signature("pdf", b"not a PDF").is_err());
     }
 
+    #[test]
+    fn validates_epub_and_azw3_container_headers() {
+        assert!(validate_signature("epub", b"PK\x03\x04rest").is_ok());
+        assert!(validate_signature("epub", b"not an EPUB").is_err());
+        let mut azw3_header = [0; 80];
+        azw3_header[60..68].copy_from_slice(b"BOOKMOBI");
+        assert!(validate_signature("azw3", &azw3_header).is_ok());
+        assert!(validate_signature("azw3", b"not an AZW3").is_err());
+    }
+
     use crate::database;
     use image::{ImageEncoder, RgbImage};
     use sha2::{Digest, Sha256};
@@ -856,6 +875,78 @@ mod tests {
         assert_eq!(page_count, 2);
         crate::thumbnails::validate_existing_thumbnail(&repository.path().join(thumbnail))
             .expect("validate imported PDF thumbnail");
+    }
+
+    #[tokio::test]
+    async fn imports_epub_cover_without_assigning_a_page_count() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        let source_directory = tempfile::tempdir().expect("temporary source");
+        initialize_repository(repository.path());
+        let image = RgbImage::from_pixel(32, 48, image::Rgb([120, 80, 200]));
+        let mut png = Cursor::new(Vec::new());
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .expect("encode EPUB cover");
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, contents) in [
+            (
+                "META-INF/container.xml",
+                br#"<container><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#
+                    .as_slice(),
+            ),
+            (
+                "book.opf",
+                br#"<package><manifest><item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/></manifest></package>"#
+                    .as_slice(),
+            ),
+            ("cover.png", png.get_ref().as_slice()),
+        ] {
+            zip.start_file(name, SimpleFileOptions::default())
+                .expect("start EPUB entry");
+            zip.write_all(contents).expect("write EPUB entry");
+        }
+        let source_path = source_directory.path().join("Book.epub");
+        std::fs::write(
+            &source_path,
+            zip.finish().expect("finish EPUB").into_inner(),
+        )
+        .expect("write source EPUB");
+
+        let ImportOutcome::Imported {
+            archive_id,
+            relative_path,
+            source_removed,
+            ..
+        } = import_archive(repository.path(), &source_path)
+            .await
+            .expect("import EPUB")
+        else {
+            panic!("expected EPUB to be imported");
+        };
+        assert!(source_removed);
+        assert!(!source_path.exists());
+        assert!(repository.path().join(relative_path).exists());
+
+        let connection =
+            rusqlite::Connection::open(repository.path().join("database/library.sqlite3"))
+                .expect("open database");
+        let (format, page_count, thumbnail): (String, Option<u64>, String) = connection
+            .query_row(
+                "SELECT format, page_count, thumbnail_relative_path
+                 FROM archives WHERE archive_id = ?1",
+                [&archive_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read imported EPUB");
+        assert_eq!(format, "epub");
+        assert_eq!(page_count, None);
+        crate::thumbnails::validate_existing_thumbnail(&repository.path().join(thumbnail))
+            .expect("validate imported EPUB thumbnail");
     }
 
     #[tokio::test]

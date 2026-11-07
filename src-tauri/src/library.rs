@@ -251,7 +251,8 @@ pub fn backfill_page_counts(repository_root: &Path) -> Result<Vec<String>, Strin
     let mut statement = connection
         .prepare(
             "SELECT archive_id, original_filename, relative_path, format
-             FROM archives WHERE page_count IS NULL",
+             FROM archives
+             WHERE page_count IS NULL AND format NOT IN ('epub', 'azw3')",
         )
         .map_err(|error| format!("ページ数が未登録のアーカイブを確認できませんでした: {error}"))?;
     let records = statement
@@ -275,7 +276,7 @@ pub fn backfill_page_counts(repository_root: &Path) -> Result<Vec<String>, Strin
         }
         let archive_path = repository_root.join(&relative_path);
         match crate::thumbnails::count_pages(&archive_path, &format) {
-            Ok(page_count) => {
+            Ok(Some(page_count)) => {
                 let page_count = i64::try_from(page_count)
                     .map_err(|_| format!("{filename}: ページ数がDBで扱える範囲を超えています"))?;
                 connection
@@ -288,6 +289,7 @@ pub fn backfill_page_counts(repository_root: &Path) -> Result<Vec<String>, Strin
                         format!("{filename}: ページ数を保存できませんでした: {error}")
                     })?;
             }
+            Ok(None) => {}
             Err(error) => failures.push(format!("{filename}: {error}")),
         }
     }

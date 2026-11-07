@@ -207,3 +207,4 @@ export const convertArchive = (
 export const cancelConversion = () => invoke<void>("cancel_conversion");
 
 export const isConvertible = (format: string) => format === "zip" || format === "cbz";
+export const isEbook = (format: string) => format === "epub" || format === "azw3";

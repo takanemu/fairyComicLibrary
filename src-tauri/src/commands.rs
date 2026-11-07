@@ -196,23 +196,39 @@ pub async fn regenerate_missing_thumbnails(
 #[tauri::command]
 pub fn open_in_viewer(archive_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let root = current_repository(&state)?;
-    let archive = crate::maintenance::archive_path(&root, &archive_id)?;
-    let viewer = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("brave-comic-viewer")))
-        .filter(|path| path.is_file())
-        .ok_or_else(|| "ビューアー（brave-comic-viewer）が見つかりません。".to_string())?;
-    let mut child = std::process::Command::new(&viewer)
-        .arg(&archive)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|error| format!("ビューアーを起動できませんでした: {error}"))?;
-    // 終了を待つだけのスレッドでゾンビプロセスを残さない。
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
+    let (archive, format) = crate::maintenance::archive_for_open(&root, &archive_id)?;
+    if matches!(format.as_str(), "epub" | "azw3") {
+        let output = std::process::Command::new("xdg-open")
+            .arg(&archive)
+            .output()
+            .map_err(|error| {
+                format!("OSに関連付けられた電子書籍リーダーを起動できませんでした: {error}")
+            })?;
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if detail.is_empty() {
+                "OSに関連付けられた電子書籍リーダーを起動できませんでした。EPUB / AZW3に対応するアプリを関連付けてください。".to_string()
+            } else {
+                format!("OSに関連付けられた電子書籍リーダーを起動できませんでした: {detail}")
+            });
+        }
+    } else {
+        let viewer = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("brave-comic-viewer")))
+            .filter(|path| path.is_file())
+            .ok_or_else(|| "ビューアー（brave-comic-viewer）が見つかりません。".to_string())?;
+        let mut child = std::process::Command::new(viewer)
+            .arg(&archive)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|error| format!("ビューアーを起動できませんでした: {error}"))?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
     crate::library::record_read(&root, &archive_id).map_err(|error| {
         format!("ビューアーは起動しましたが読書履歴を更新できませんでした: {error}")
     })
