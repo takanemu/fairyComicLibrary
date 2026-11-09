@@ -103,6 +103,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [view, setView] = useState<LibraryViewId>("all");
+  const [isMaximized, setIsMaximized] = useState(false);
   const [initialSort] = useState(loadSort);
   const [sortBy, setSortBy] = useState<ArchiveSortBy>(initialSort.sortBy);
   const [sortDirection, setSortDirection] = useState<SortDirection>(
@@ -125,6 +126,52 @@ function App() {
   const convertingRef = useRef(false);
   const closeAfterConvertRef = useRef(false);
   const canImportRef = useRef(false);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) {
+      return;
+    }
+
+    const appWindow = getCurrentWindow();
+    let active = true;
+    let unlisten: (() => void) | undefined;
+
+    const updateMaximizedState = async () => {
+      try {
+        const maximized = await appWindow.isMaximized();
+        if (active) {
+          setIsMaximized(maximized);
+        }
+      } catch (reason) {
+        if (active) {
+          setError(`ウィンドウ状態を確認できませんでした: ${String(reason)}`);
+        }
+      }
+    };
+
+    void appWindow
+      .onResized(() => {
+        void updateMaximizedState();
+      })
+      .then((stopListening) => {
+        if (active) {
+          unlisten = stopListening;
+          void updateMaximizedState();
+        } else {
+          stopListening();
+        }
+      })
+      .catch((reason: unknown) => {
+        if (active) {
+          setError(`ウィンドウ状態の監視を開始できませんでした: ${String(reason)}`);
+        }
+      });
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -592,7 +639,7 @@ function App() {
 
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header
-          className="flex h-12 shrink-0 cursor-move select-none items-center justify-between border-b border-white/5 px-10"
+          className="flex h-12 shrink-0 cursor-move select-none items-center justify-between border-b border-white/5 pl-10 pr-3"
           onMouseDown={(event) => {
             if (
               event.button !== 0 ||
@@ -608,28 +655,33 @@ function App() {
               );
           }}
         >
-          <div className="flex h-full items-center">
-            <h1 className="text-lg font-semibold tracking-tight">
-              {navigation.find((item) => item.id === view)?.label}
-            </h1>
-          </div>
-          <div className="flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-2">
             <button
-              aria-label="最大化 / 元に戻す"
+              aria-label={isMaximized ? "元に戻す" : "最大化"}
               className="grid size-8 cursor-pointer place-items-center rounded-lg text-slate-400 transition hover:bg-white/[0.08] hover:text-white"
               onClick={() => {
                 if (!("__TAURI_INTERNALS__" in window)) return;
-                void getCurrentWindow()
+                const appWindow = getCurrentWindow();
+                void appWindow
                   .toggleMaximize()
-                  .catch((reason: unknown) =>
-                    setError(`ウィンドウを最大化できませんでした: ${String(reason)}`),
-                  );
+                  .then(() => appWindow.isMaximized())
+                  .then(setIsMaximized)
+                  .catch((reason: unknown) => {
+                    setError(`ウィンドウを最大化できませんでした: ${String(reason)}`);
+                  });
               }}
-              title="最大化 / 元に戻す"
+              title={isMaximized ? "元に戻す" : "最大化"}
               type="button"
             >
               <svg aria-hidden="true" fill="none" height="14" viewBox="0 0 14 14" width="14">
-                <rect height="9" rx="1" stroke="currentColor" strokeWidth="1.4" width="9" x="2.5" y="2.5" />
+                {isMaximized ? (
+                  <>
+                    <path d="M5.5 4.5v-2h6v6h-2" stroke="currentColor" strokeLinejoin="round" strokeWidth="1.3" />
+                    <rect height="6" rx="0.7" stroke="currentColor" strokeWidth="1.3" width="6" x="2.5" y="5.5" />
+                  </>
+                ) : (
+                  <rect height="9" rx="0.8" stroke="currentColor" strokeWidth="1.3" width="9" x="2.5" y="2.5" />
+                )}
               </svg>
             </button>
             <button
