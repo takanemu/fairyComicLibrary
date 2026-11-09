@@ -455,7 +455,7 @@ function App() {
   }
 
   return (
-    <div className="relative flex min-h-screen bg-canvas text-slate-100">
+    <div className="relative flex h-screen overflow-hidden bg-canvas text-slate-100">
       {isDragging && (
         <div
           aria-live="polite"
@@ -466,7 +466,7 @@ function App() {
           </p>
         </div>
       )}
-      <aside className="sticky top-0 flex h-screen w-64 shrink-0 flex-col border-r border-white/5 bg-sidebar px-5 py-6">
+      <aside className="flex h-full w-64 shrink-0 flex-col border-r border-white/5 bg-sidebar px-5 py-6">
         <p className="mb-3 px-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
           ライブラリ
         </p>
@@ -593,9 +593,9 @@ function App() {
         </div>
       </aside>
 
-      <main className="min-w-0 flex-1">
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header
-          className="flex h-12 cursor-move select-none items-center justify-between border-b border-white/5 px-10"
+          className="flex h-12 shrink-0 cursor-move select-none items-center justify-between border-b border-white/5 px-10"
           onMouseDown={(event) => {
             if (
               event.button !== 0 ||
@@ -656,10 +656,10 @@ function App() {
           </div>
         </header>
 
-        <section className="flex min-h-[calc(100vh-49px)] flex-col px-6 pb-6 pt-3">
+        <section className="flex min-h-0 flex-1 flex-col px-6 pb-6">
           {repository && (
-            <div className="mb-3 flex items-baseline justify-between gap-4">
-              <p className="text-xs text-slate-500">
+            <div className="flex h-14 shrink-0 items-center justify-between gap-4">
+              <p className="shrink-0 text-xs text-slate-500">
                 {archiveCount !== null ? `${archiveCount} 件` : ""}
               </p>
               <div className="flex items-center gap-2">
@@ -699,7 +699,7 @@ function App() {
                   </span>
                   <input
                     aria-label="ファイル名・タグで検索"
-                    className="w-56 bg-transparent outline-none placeholder:text-slate-600"
+                    className="w-32 bg-transparent outline-none placeholder:text-slate-600 xl:w-56"
                     onChange={(event) => setSearchText(event.target.value)}
                     placeholder="ファイル名・タグで検索"
                     type="search"
@@ -710,79 +710,81 @@ function App() {
             </div>
           )}
 
-          {repository && repository.warnings.length > 0 && (
-            <div
-              className="mb-5 space-y-1 rounded-xl border border-amber-300/25 bg-amber-300/[0.06] px-4 py-3 text-xs leading-5 text-amber-200"
-              role="alert"
-            >
-              <p className="font-medium">リポジトリの検証で問題が見つかりました</p>
-              {repository.warnings.map((warning) => (
-                <p className="break-all" key={warning}>
-                  {warning}
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">
+            {repository && repository.warnings.length > 0 && (
+              <div
+                className="mb-5 space-y-1 rounded-xl border border-amber-300/25 bg-amber-300/[0.06] px-4 py-3 text-xs leading-5 text-amber-200"
+                role="alert"
+              >
+                <p className="font-medium">リポジトリの検証で問題が見つかりました</p>
+                {repository.warnings.map((warning) => (
+                  <p className="break-all" key={warning}>
+                    {warning}
+                  </p>
+                ))}
+                {repository.warnings.some((warning) => warning.startsWith("サムネイル")) && (
+                  <button
+                    className="mt-2 rounded-lg border border-amber-300/30 px-3 py-1.5 text-xs font-medium text-amber-100 transition hover:bg-amber-300/10 disabled:opacity-50"
+                    disabled={isRegenerating}
+                    onClick={regenerateMissing}
+                    type="button"
+                  >
+                    {isRegenerating ? "再作成中…" : "欠けたサムネイルを再作成"}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {error && (
+              <div
+                className="mb-5 rounded-xl border border-rose-300/20 bg-rose-300/[0.06] px-4 py-3 text-sm text-rose-200"
+                role="alert"
+              >
+                {error}
+              </div>
+            )}
+
+            {repository ? (
+              <LibraryView
+                isFiltered={isFiltered}
+                onConvertComplete={handleConvertComplete}
+                onConvertingChange={handleConvertingChange}
+                onCountChange={setArchiveCount}
+                onError={setError}
+                onMutated={bumpVersion}
+                activeTagIds={tagIds}
+                onToggleTagFilter={(id) =>
+                  setTagIds((current) =>
+                    current.includes(id)
+                      ? current.filter((value) => value !== id)
+                      : [...current, id],
+                  )
+                }
+                query={query}
+                version={version}
+              />
+            ) : (
+              <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-white/[0.09] bg-white/[0.012] px-6 py-16 text-center">
+                <div className="mb-6 grid size-[68px] place-items-center rounded-2xl border border-violet-300/10 bg-violet-300/[0.06] text-3xl text-violet-200/80">
+                  ◫
+                </div>
+                <h3 className="text-base font-medium text-slate-200">
+                  リポジトリを設定してください
+                </h3>
+                <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">
+                  空のディレクトリを選ぶと、アーカイブ・サムネイル・SQLiteデータベース用の構成を作成します。フォルダーは事前に作成してください。
                 </p>
-              ))}
-              {repository.warnings.some((warning) => warning.startsWith("サムネイル")) && (
                 <button
-                  className="mt-2 rounded-lg border border-amber-300/30 px-3 py-1.5 text-xs font-medium text-amber-100 transition hover:bg-amber-300/10 disabled:opacity-50"
-                  disabled={isRegenerating}
-                  onClick={regenerateMissing}
+                  className="mt-7 rounded-lg bg-violet-400/15 px-4 py-2.5 text-xs font-medium text-violet-200 transition hover:bg-violet-400/20 disabled:cursor-wait disabled:opacity-50"
+                  disabled={isSelecting || isLoading}
+                  onClick={selectRepository}
                   type="button"
                 >
-                  {isRegenerating ? "再作成中…" : "欠けたサムネイルを再作成"}
+                  {isSelecting ? "準備中…" : "リポジトリを選択"}
                 </button>
-              )}
-            </div>
-          )}
-
-          {error && (
-            <div
-              className="mb-5 rounded-xl border border-rose-300/20 bg-rose-300/[0.06] px-4 py-3 text-sm text-rose-200"
-              role="alert"
-            >
-              {error}
-            </div>
-          )}
-
-          {repository ? (
-            <LibraryView
-              isFiltered={isFiltered}
-              onConvertComplete={handleConvertComplete}
-              onConvertingChange={handleConvertingChange}
-              onCountChange={setArchiveCount}
-              onError={setError}
-              onMutated={bumpVersion}
-              activeTagIds={tagIds}
-              onToggleTagFilter={(id) =>
-                setTagIds((current) =>
-                  current.includes(id)
-                    ? current.filter((value) => value !== id)
-                    : [...current, id],
-                )
-              }
-              query={query}
-              version={version}
-            />
-          ) : (
-            <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-white/[0.09] bg-white/[0.012] px-6 py-16 text-center">
-              <div className="mb-6 grid size-[68px] place-items-center rounded-2xl border border-violet-300/10 bg-violet-300/[0.06] text-3xl text-violet-200/80">
-                ◫
               </div>
-              <h3 className="text-base font-medium text-slate-200">
-                リポジトリを設定してください
-              </h3>
-              <p className="mt-2 max-w-sm text-sm leading-6 text-slate-500">
-                空のディレクトリを選ぶと、アーカイブ・サムネイル・SQLiteデータベース用の構成を作成します。フォルダーは事前に作成してください。
-              </p>
-              <button
-                className="mt-7 rounded-lg bg-violet-400/15 px-4 py-2.5 text-xs font-medium text-violet-200 transition hover:bg-violet-400/20 disabled:cursor-wait disabled:opacity-50"
-                disabled={isSelecting || isLoading}
-                onClick={selectRepository}
-                type="button"
-              >
-                {isSelecting ? "準備中…" : "リポジトリを選択"}
-              </button>
-            </div>
-          )}
+            )}
+          </div>
         </section>
       </main>
       {repository && (
