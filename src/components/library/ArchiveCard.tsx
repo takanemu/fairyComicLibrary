@@ -10,22 +10,39 @@ type Props = {
 };
 
 function filenameWithoutTags(filename: string) {
-  const trimmedFilename = filename.trimStart();
-  if (!trimmedFilename.startsWith("(")) return filename;
-
-  const classificationEnd = trimmedFilename.indexOf(")");
-  if (classificationEnd < 0) return filename;
-  const classification = trimmedFilename.slice(1, classificationEnd).trim();
-  const afterClassification = trimmedFilename.slice(classificationEnd + 1).trimStart();
-  if (!afterClassification.startsWith("[")) return filename;
-
-  const authorEnd = afterClassification.indexOf("]");
-  if (authorEnd < 0) return filename;
-  const author = afterClassification.slice(1, authorEnd).trim();
   const isValidTag = (tag: string) => tag.length > 0 && Array.from(tag).length <= 100;
-  if (!isValidTag(classification) || !isValidTag(author)) return filename;
+  let remaining = filename.trimStart();
+  let preservedPrefix = "";
+  let removedTag = false;
 
-  return afterClassification.slice(authorEnd + 1).trimStart();
+  if (remaining.startsWith("(")) {
+    const classificationEnd = remaining.indexOf(")");
+    if (classificationEnd < 0) return filename;
+
+    const classificationPrefix = remaining.slice(0, classificationEnd + 1);
+    const classification = remaining.slice(1, classificationEnd).trim();
+    if (isValidTag(classification)) {
+      remaining = remaining.slice(classificationEnd + 1).trimStart();
+      removedTag = true;
+    } else {
+      preservedPrefix = classificationPrefix;
+      remaining = remaining.slice(classificationEnd + 1).trimStart();
+    }
+  }
+
+  if (remaining.startsWith("[")) {
+    const authorEnd = remaining.indexOf("]");
+    if (authorEnd >= 0) {
+      const author = remaining.slice(1, authorEnd).trim();
+      if (isValidTag(author)) {
+        remaining = remaining.slice(authorEnd + 1).trimStart();
+        removedTag = true;
+      }
+    }
+  }
+
+  if (!removedTag) return filename;
+  return preservedPrefix ? `${preservedPrefix} ${remaining}`.trimEnd() : remaining;
 }
 
 export function ArchiveCard({ archive, selected, onSelect, onOpen, onToggleFavorite }: Props) {
