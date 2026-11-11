@@ -761,24 +761,27 @@ fn register_archive(
             ],
         )
         .map_err(|error| format!("アーカイブ情報をDBへ登録できませんでした: {error}"))?;
-    let (classification, author) = parse_filename_tags(filename);
-    for (category, name) in [("classification", classification), ("author", author)]
-        .into_iter()
-        .filter_map(|(category, name)| name.map(|name| (category, name)))
-    {
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO tags (name, category) VALUES (?1, ?2)",
-                params![name, category],
-            )
-            .map_err(|error| format!("タグを作成できませんでした: {error}"))?;
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO archive_tags (archive_id, tag_id)
-                 SELECT ?1, id FROM tags WHERE name = ?2 AND category = ?3",
-                params![archive_id, name, category],
-            )
-            .map_err(|error| format!("タグを付けられませんでした: {error}"))?;
+    let (classifications, authors, series) = parse_filename_tags(filename);
+    for (category, names) in [
+        ("classification", classifications),
+        ("author", authors),
+        ("series", series),
+    ] {
+        for name in names {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO tags (name, category) VALUES (?1, ?2)",
+                    params![name, category],
+                )
+                .map_err(|error| format!("タグを作成できませんでした: {error}"))?;
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO archive_tags (archive_id, tag_id)
+                     SELECT ?1, id FROM tags WHERE name = ?2 AND category = ?3",
+                    params![archive_id, name, category],
+                )
+                .map_err(|error| format!("タグを付けられませんでした: {error}"))?;
+        }
     }
     transaction
         .commit()
@@ -787,27 +790,35 @@ fn register_archive(
 
 const MAX_TAG_NAME_CHARS: usize = 100;
 
-// 先頭の (分類) と [作者名] をそれぞれ解析する。
-fn parse_filename_tags(filename: &str) -> (Option<&str>, Option<&str>) {
+// ファイル名先頭に連続するタグ表記を分類・作者・シリーズごとに解析する。
+fn parse_filename_tags(filename: &str) -> (Vec<&str>, Vec<&str>, Vec<&str>) {
     let valid = |name: &str| !name.is_empty() && name.chars().count() <= MAX_TAG_NAME_CHARS;
-    let filename = filename.trim_start();
-    let (classification, rest) = if let Some(rest) = filename.strip_prefix('(') {
-        match rest.split_once(')') {
-            Some((name, rest)) => {
-                let name = name.trim();
-                (valid(name).then_some(name), rest.trim_start())
-            }
-            None => (None, ""),
+    let mut classifications = Vec::new();
+    let mut authors = Vec::new();
+    let mut series = Vec::new();
+    let mut remaining = filename.trim_start();
+
+    loop {
+        let Some(open) = remaining.chars().next() else {
+            break;
+        };
+        let (close, tags) = match open {
+            '(' => (')', &mut classifications),
+            '[' => (']', &mut authors),
+            '{' => ('}', &mut series),
+            _ => break,
+        };
+        let Some((name, rest)) = remaining[open.len_utf8()..].split_once(close) else {
+            break;
+        };
+        let name = name.trim();
+        if valid(name) {
+            tags.push(name);
         }
-    } else {
-        (None, filename)
-    };
-    let author = rest
-        .strip_prefix('[')
-        .and_then(|rest| rest.split_once(']'))
-        .map(|(name, _)| name.trim())
-        .filter(|name| valid(name));
-    (classification, author)
+        remaining = rest.trim_start();
+    }
+
+    (classifications, authors, series)
 }
 
 fn next_staging_name() -> String {
@@ -837,34 +848,55 @@ mod tests {
     use super::{import_archive, ImportOutcome};
 
     #[test]
-    fn parses_classification_and_author_independently_from_filename_prefix() {
+    fn parses_multiple_filename_tags_from_the_prefix() {
         assert_eq!(
             parse_filename_tags("(一般コミック)[山田太郎]タイトル.zip"),
-            (Some("一般コミック"), Some("山田太郎"))
+            (vec!["一般コミック"], vec!["山田太郎"], Vec::<&str>::new())
         );
         assert_eq!(
             parse_filename_tags("(コミック)タイトル.zip"),
-            (Some("コミック"), None)
+            (vec!["コミック"], Vec::<&str>::new(), Vec::<&str>::new())
         );
         assert_eq!(
             parse_filename_tags("[作者名]タイトル.zip"),
-            (None, Some("作者名"))
+            (Vec::<&str>::new(), vec!["作者名"], Vec::<&str>::new())
+        );
+        assert_eq!(
+            parse_filename_tags("(分類1)(分類2)[作者1][作者2]{シリーズ1}{シリーズ2} タイトル.zip"),
+            (
+                vec!["分類1", "分類2"],
+                vec!["作者1", "作者2"],
+                vec!["シリーズ1", "シリーズ2"]
+            )
+        );
+        assert_eq!(
+            parse_filename_tags("{シリーズ}[作者](分類) タイトル.zip"),
+            (vec!["分類"], vec!["作者"], vec!["シリーズ"])
         );
         assert_eq!(
             parse_filename_tags("タイトル(分類)[作者].zip"),
-            (None, None)
+            (Vec::<&str>::new(), Vec::<&str>::new(), Vec::<&str>::new())
         );
         assert_eq!(
             parse_filename_tags("(コミック) [作者名] とらのあな限定 小冊子.zip"),
-            (Some("コミック"), Some("作者名"))
+            (vec!["コミック"], vec!["作者名"], Vec::<&str>::new())
         );
         assert_eq!(
-            parse_filename_tags("( コミック )  [ 作者名 ]タイトル.zip"),
-            (Some("コミック"), Some("作者名"))
+            parse_filename_tags("( コミック )  [ 作者名 ] { シリーズ }タイトル.zip"),
+            (vec!["コミック"], vec!["作者名"], vec!["シリーズ"])
         );
-        assert_eq!(parse_filename_tags("()[作者]x.zip"), (None, Some("作者")));
-        assert_eq!(parse_filename_tags("[]x.zip"), (None, None));
-        assert_eq!(parse_filename_tags("(分類)[ ]x.zip"), (Some("分類"), None));
+        assert_eq!(
+            parse_filename_tags("()[作者]{}x.zip"),
+            (Vec::<&str>::new(), vec!["作者"], Vec::<&str>::new())
+        );
+        assert_eq!(
+            parse_filename_tags("[]{}x.zip"),
+            (Vec::<&str>::new(), Vec::<&str>::new(), Vec::<&str>::new())
+        );
+        assert_eq!(
+            parse_filename_tags("(分類)[ ]{シリーズ}x.zip"),
+            (vec!["分類"], Vec::<&str>::new(), vec!["シリーズ"])
+        );
     }
 
     #[test]
@@ -962,7 +994,9 @@ mod tests {
         let repository = tempfile::tempdir().expect("temporary repository");
         let source_directory = tempfile::tempdir().expect("temporary source");
         initialize_repository(repository.path());
-        let source_path = source_directory.path().join("(動画) [作家] サンプル.MKV");
+        let source_path = source_directory
+            .path()
+            .join("(動画)(同人) [作家][原作] {シリーズA}{シリーズB} サンプル.MKV");
         std::fs::write(&source_path, b"\x1a\x45\xdf\xa3\x93\x42\x82\x88matroska")
             .expect("write sample Matroska file");
 
@@ -1000,16 +1034,21 @@ mod tests {
                  WHERE archive_id = ?1 ORDER BY category",
             )
             .expect("prepare tag query");
-        let tags: Vec<(String, String)> = statement
+        let mut tags: Vec<(String, String)> = statement
             .query_map([archive_id], |row| Ok((row.get(0)?, row.get(1)?)))
             .expect("query tags")
             .collect::<Result<_, _>>()
             .expect("collect tags");
+        tags.sort();
         assert_eq!(
             tags,
             vec![
                 ("author".to_string(), "作家".to_string()),
-                ("classification".to_string(), "動画".to_string())
+                ("author".to_string(), "原作".to_string()),
+                ("classification".to_string(), "動画".to_string()),
+                ("classification".to_string(), "同人".to_string()),
+                ("series".to_string(), "シリーズA".to_string()),
+                ("series".to_string(), "シリーズB".to_string()),
             ]
         );
     }

@@ -13,37 +13,26 @@ type Props = {
 function filenameWithoutTags(filename: string) {
   const isValidTag = (tag: string) => tag.length > 0 && Array.from(tag).length <= 100;
   let remaining = filename.trimStart();
-  let preservedPrefix = "";
+  const preservedTags: string[] = [];
   let removedTag = false;
 
-  if (remaining.startsWith("(")) {
-    const classificationEnd = remaining.indexOf(")");
-    if (classificationEnd < 0) return filename;
+  while (remaining.startsWith("(") || remaining.startsWith("[") || remaining.startsWith("{")) {
+    const opening = remaining[0];
+    const closing = opening === "(" ? ")" : opening === "[" ? "]" : "}";
+    const tagEnd = remaining.indexOf(closing);
+    if (tagEnd < 0) break;
 
-    const classificationPrefix = remaining.slice(0, classificationEnd + 1);
-    const classification = remaining.slice(1, classificationEnd).trim();
-    if (isValidTag(classification)) {
-      remaining = remaining.slice(classificationEnd + 1).trimStart();
+    const tag = remaining.slice(1, tagEnd).trim();
+    if (isValidTag(tag)) {
       removedTag = true;
     } else {
-      preservedPrefix = classificationPrefix;
-      remaining = remaining.slice(classificationEnd + 1).trimStart();
+      preservedTags.push(remaining.slice(0, tagEnd + 1));
     }
-  }
-
-  if (remaining.startsWith("[")) {
-    const authorEnd = remaining.indexOf("]");
-    if (authorEnd >= 0) {
-      const author = remaining.slice(1, authorEnd).trim();
-      if (isValidTag(author)) {
-        remaining = remaining.slice(authorEnd + 1).trimStart();
-        removedTag = true;
-      }
-    }
+    remaining = remaining.slice(tagEnd + 1).trimStart();
   }
 
   if (!removedTag) return filename;
-  return preservedPrefix ? `${preservedPrefix} ${remaining}`.trimEnd() : remaining;
+  return [...preservedTags, remaining].filter(Boolean).join(" ");
 }
 
 export function ArchiveCard({ archive, selected, onSelect, onOpen, onToggleFavorite }: Props) {
