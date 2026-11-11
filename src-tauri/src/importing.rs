@@ -34,6 +34,14 @@ pub async fn import_archive(
     repository_root: &Path,
     source_path: &Path,
 ) -> Result<ImportOutcome, String> {
+    import_archive_with_thumbnail(repository_root, source_path, None).await
+}
+
+pub async fn import_archive_with_thumbnail(
+    repository_root: &Path,
+    source_path: &Path,
+    thumbnail_source: Option<&Path>,
+) -> Result<ImportOutcome, String> {
     let path_metadata = fs::symlink_metadata(source_path)
         .await
         .map_err(|error| format!("選択したファイルを確認できませんでした: {error}"))?;
@@ -60,11 +68,26 @@ pub async fn import_archive(
         .and_then(|extension| extension.to_str())
         .map(str::to_ascii_lowercase)
         .ok_or_else(|| "対応する拡張子のアーカイブを選択してください。".to_string())?;
-    if !["7z", "zip", "rar", "cbz", "cbr", "pdf", "epub", "azw3"].contains(&extension.as_str()) {
+    if ![
+        "7z", "zip", "rar", "cbz", "cbr", "pdf", "epub", "azw3", "mkv", "mp4",
+    ]
+    .contains(&extension.as_str())
+    {
         return Err(format!(
-            "対応していないファイル形式です: .{extension}（7z、zip、rar、cbz、cbr、pdf、epub、azw3に対応）"
+            "対応していないファイル形式です: .{extension}（7z、zip、rar、cbz、cbr、pdf、epub、azw3、mkv、mp4に対応）"
         ));
     }
+    let is_video = matches!(extension.as_str(), "mkv" | "mp4");
+    let thumbnail_source = if is_video {
+        thumbnail_source
+            .map(|path| validate_package_image_source(path, &source_path))
+            .transpose()?
+    } else {
+        if thumbnail_source.is_some() {
+            return Err("パッケージ画像を指定できるのは動画ファイルのみです。".to_string());
+        }
+        None
+    };
 
     let lock_path = source_path.clone();
     let source_lock = tokio::task::spawn_blocking(move || open_shared_locked_file(&lock_path))
@@ -81,10 +104,16 @@ pub async fn import_archive(
         .try_clone()
         .map_err(|error| format!("アーカイブのヘッダーを読み込めませんでした: {error}"))?;
     let mut header = [0_u8; 80];
-    let header_length = if extension == "azw3" { 80 } else { 8 };
-    header_file
-        .read_exact(&mut header[..header_length])
-        .map_err(|error| format!("アーカイブのヘッダーを読み込めませんでした: {error}"))?;
+    let header_length = if extension == "azw3" {
+        header_file
+            .read_exact(&mut header)
+            .map_err(|error| format!("アーカイブのヘッダーを読み込めませんでした: {error}"))?;
+        80
+    } else {
+        header_file
+            .read(&mut header[..16])
+            .map_err(|error| format!("アーカイブのヘッダーを読み込めませんでした: {error}"))?
+    };
     validate_signature(&extension, &header[..header_length])?;
 
     let hash_file = source_lock
@@ -124,46 +153,67 @@ pub async fn import_archive(
         }
     };
 
-    let thumbnail_relative_path = format!("thumbnails/{}/{}.webp", &archive_id[..2], archive_id);
-    let thumbnail_destination = repository_root.join(&thumbnail_relative_path);
-    let thumbnail_staging_directory = repository_root.join("thumbnails/.staging");
-    if let Err(error) = fs::create_dir_all(&thumbnail_staging_directory).await {
-        return Err(format!(
-            "サムネイル用一時ディレクトリを作成できませんでした: {error}"
-        ));
-    }
-    let thumbnail_staging_path =
-        thumbnail_staging_directory.join(format!("{}.webp.part", next_staging_name()));
-    let thumbnail_archive_path = source_path.clone();
-    let thumbnail_output_path = thumbnail_staging_path.clone();
-    let thumbnail_format = extension.clone();
-    let generated_thumbnail = match tokio::task::spawn_blocking(move || {
-        crate::thumbnails::create_thumbnail(
-            &thumbnail_archive_path,
-            &thumbnail_format,
-            &thumbnail_output_path,
-        )
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            remove_if_exists(&thumbnail_staging_path).await;
-            return Err(format!("サムネイル生成処理に失敗しました: {error}"));
-        }
+    let thumbnail_relative_path = if is_video && thumbnail_source.is_none() {
+        None
+    } else {
+        Some(format!(
+            "thumbnails/{}/{}.webp",
+            &archive_id[..2],
+            archive_id
+        ))
     };
-    if let Err(error) = generated_thumbnail {
-        remove_if_exists(&thumbnail_staging_path).await;
-        return Err(format!(
-            "表紙サムネイルを作成できなかったため、インポートを中止しました: {error}"
-        ));
-    }
+    let thumbnail_destination = thumbnail_relative_path
+        .as_deref()
+        .map(|relative| repository_root.join(relative));
+    let thumbnail_staging_path = if thumbnail_relative_path.is_some() {
+        let thumbnail_staging_directory = repository_root.join("thumbnails/.staging");
+        if let Err(error) = fs::create_dir_all(&thumbnail_staging_directory).await {
+            return Err(format!(
+                "サムネイル用一時ディレクトリを作成できませんでした: {error}"
+            ));
+        }
+        let staging =
+            thumbnail_staging_directory.join(format!("{}.webp.part", next_staging_name()));
+        let output_path = staging.clone();
+        let thumbnail_source = thumbnail_source.clone();
+        let thumbnail_archive_path = source_path.clone();
+        let thumbnail_format = extension.clone();
+        let generated_thumbnail = tokio::task::spawn_blocking(move || match thumbnail_source {
+            Some(image_path) => {
+                crate::thumbnails::create_thumbnail_from_file(&image_path, &output_path)
+            }
+            None => crate::thumbnails::create_thumbnail(
+                &thumbnail_archive_path,
+                &thumbnail_format,
+                &output_path,
+            ),
+        })
+        .await;
+        match generated_thumbnail {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                remove_if_exists(&staging).await;
+                return Err(format!(
+                    "パッケージ画像または表紙サムネイルを作成できなかったため、インポートを中止しました: {error}"
+                ));
+            }
+            Err(error) => {
+                remove_if_exists(&staging).await;
+                return Err(format!("サムネイル生成処理に失敗しました: {error}"));
+            }
+        }
+        Some(staging)
+    } else {
+        None
+    };
 
     if !metadata_matches(
         &source_metadata,
         &fs::symlink_metadata(&source_path).await.ok(),
     ) {
-        remove_if_exists(&thumbnail_staging_path).await;
+        if let Some(staging) = &thumbnail_staging_path {
+            remove_if_exists(staging).await;
+        }
         return Err(
             "処理中に元ファイルの場所または内容が変わったため、インポートを中止しました。"
                 .to_string(),
@@ -176,7 +226,9 @@ pub async fn import_archive(
         .parent()
         .ok_or_else(|| "アーカイブの保存先を作成できませんでした。".to_string())?;
     if let Err(error) = fs::create_dir_all(destination_directory).await {
-        remove_if_exists(&thumbnail_staging_path).await;
+        if let Some(staging) = &thumbnail_staging_path {
+            remove_if_exists(staging).await;
+        }
         return Err(format!("アーカイブの保存先を作成できませんでした: {error}"));
     }
     let archive_staging_path = repository_root
@@ -192,7 +244,9 @@ pub async fn import_archive(
     {
         Ok(created) => created,
         Err(error) => {
-            remove_if_exists(&thumbnail_staging_path).await;
+            if let Some(staging) = &thumbnail_staging_path {
+                remove_if_exists(staging).await;
+            }
             remove_empty_directory(destination_directory).await;
             return Err(error);
         }
@@ -202,25 +256,27 @@ pub async fn import_archive(
             .await
             .is_ok_and(|path| path == source_path);
 
-    let thumbnail_directory = thumbnail_destination
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| repository_root.join("thumbnails"));
-    if let Err(error) = fs::create_dir_all(&thumbnail_directory).await {
-        remove_if_exists(&thumbnail_staging_path).await;
-        let rollback = rollback_archive(&destination, destination_created).await;
-        return Err(format!(
-            "サムネイルの保存先を作成できませんでした: {error}{}",
-            rollback
-                .map(|message| format!(" {message}"))
-                .unwrap_or_default()
-        ));
-    }
-    let thumbnail_created =
-        match place_thumbnail(&thumbnail_staging_path, &thumbnail_destination).await {
-            Ok(created) => created,
+    let thumbnail_created = if let (Some(staging), Some(thumbnail_destination)) =
+        (&thumbnail_staging_path, &thumbnail_destination)
+    {
+        let thumbnail_directory = thumbnail_destination
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| repository_root.join("thumbnails"));
+        if let Err(error) = fs::create_dir_all(&thumbnail_directory).await {
+            remove_if_exists(staging).await;
+            let rollback = rollback_archive(&destination, destination_created).await;
+            return Err(format!(
+                "サムネイルの保存先を作成できませんでした: {error}{}",
+                rollback
+                    .map(|message| format!(" {message}"))
+                    .unwrap_or_default()
+            ));
+        }
+        match place_thumbnail(staging, thumbnail_destination).await {
+            Ok(created) => Some((thumbnail_destination.clone(), created)),
             Err(error) => {
-                remove_if_exists(&thumbnail_staging_path).await;
+                remove_if_exists(staging).await;
                 let rollback = rollback_archive(&destination, destination_created).await;
                 remove_empty_directory(&thumbnail_directory).await;
                 return Err(format!(
@@ -230,21 +286,27 @@ pub async fn import_archive(
                         .unwrap_or_default()
                 ));
             }
-        };
+        }
+    } else {
+        None
+    };
 
     if let Err(error) = register_archive(
         &database_path,
         &archive_id,
         &filename,
         &relative_path,
-        &thumbnail_relative_path,
+        thumbnail_relative_path.as_deref(),
         &extension,
         file_size,
         page_count,
     ) {
         let archive_rollback_error = rollback_archive(&destination, destination_created).await;
-        let thumbnail_rollback_error =
-            rollback_archive(&thumbnail_destination, thumbnail_created).await;
+        let thumbnail_rollback_error = if let Some((path, created)) = thumbnail_created {
+            rollback_archive(&path, created).await
+        } else {
+            None
+        };
         let rollback_message = [archive_rollback_error, thumbnail_rollback_error]
             .into_iter()
             .flatten()
@@ -564,6 +626,58 @@ async fn copy_staged_file(source: &Path, destination: &Path) -> Result<(), Strin
     result
 }
 
+fn validate_package_image_source(
+    path: &Path,
+    video_path: &Path,
+) -> Result<std::path::PathBuf, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("指定されたパッケージ画像を確認できませんでした: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(
+            "パッケージ画像にはシンボリックリンクではない通常ファイルを選択してください。"
+                .to_string(),
+        );
+    }
+    if metadata.len() > 64 * 1024 * 1024 {
+        return Err("パッケージ画像のファイルサイズが上限（64 MiB）を超えています。".to_string());
+    }
+
+    let image_path = path
+        .canonicalize()
+        .map_err(|error| format!("パッケージ画像の場所を確定できませんでした: {error}"))?;
+    let image_stem = image_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| "パッケージ画像のファイル名を読み取れません。".to_string())?;
+    let image_parent = image_path
+        .parent()
+        .ok_or_else(|| "パッケージ画像の場所を確認できません。".to_string())?;
+    let video_stem = video_path.file_stem().and_then(|stem| stem.to_str());
+    let video_parent = video_path.parent();
+    if Some(image_stem) != video_stem || Some(image_parent) != video_parent {
+        return Err(
+            "パッケージ画像のファイル名（拡張子を除く）は動画と一致させてください。".to_string(),
+        );
+    }
+    let extension = image_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "対応する画像形式（PNG、WebP、JPEGなど）を選択してください。".to_string())?;
+    if !matches!(
+        extension.as_str(),
+        "png" | "webp" | "jpg" | "jpeg" | "gif" | "bmp"
+    ) {
+        return Err(format!(
+            "対応していないパッケージ画像形式です: .{extension}"
+        ));
+    }
+    if !image_parent.is_dir() {
+        return Err("パッケージ画像の保存場所が不正です。".to_string());
+    }
+    Ok(image_path)
+}
+
 fn validate_signature(extension: &str, header: &[u8]) -> Result<(), String> {
     let is_valid = match extension {
         "pdf" => header.starts_with(b"%PDF-"),
@@ -582,6 +696,8 @@ fn validate_signature(extension: &str, header: &[u8]) -> Result<(), String> {
                 || header.starts_with(b"PK\x07\x08")
         }
         "azw3" => header.get(60..68) == Some(b"BOOKMOBI"),
+        "mkv" => header.starts_with(b"\x1a\x45\xdf\xa3"),
+        "mp4" => header.len() >= 12 && header.get(4..8) == Some(b"ftyp"),
         _ => false,
     };
 
@@ -589,7 +705,7 @@ fn validate_signature(extension: &str, header: &[u8]) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "拡張子 .{extension} とアーカイブのファイルヘッダーが一致しません。ファイル形式と破損の有無を確認してください。"
+            "拡張子 .{extension} とファイルのヘッダーが一致しません。ファイル形式と破損の有無を確認してください。"
         ))
     }
 }
@@ -612,7 +728,7 @@ fn register_archive(
     archive_id: &str,
     filename: &str,
     relative_path: &str,
-    thumbnail_relative_path: &str,
+    thumbnail_relative_path: Option<&str>,
     format: &str,
     file_size: u64,
     page_count: Option<u64>,
@@ -767,6 +883,14 @@ mod tests {
         assert!(validate_signature("azw3", b"not an AZW3").is_err());
     }
 
+    #[test]
+    fn validates_video_container_headers() {
+        assert!(validate_signature("mkv", b"\x1a\x45\xdf\xa3rest").is_ok());
+        assert!(validate_signature("mkv", b"not Matroska").is_err());
+        assert!(validate_signature("mp4", b"\0\0\0\x18ftypisom").is_ok());
+        assert!(validate_signature("mp4", b"\0\0\0\x18moovisom").is_err());
+    }
+
     use crate::database;
     use image::{ImageEncoder, RgbImage};
     use sha2::{Digest, Sha256};
@@ -831,6 +955,107 @@ mod tests {
         assert!(!source_path.exists());
         assert!(source_removed);
         assert!(repository.path().join(relative_path).exists());
+    }
+
+    #[tokio::test]
+    async fn imports_video_without_thumbnail_and_preserves_filename_tags() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        let source_directory = tempfile::tempdir().expect("temporary source");
+        initialize_repository(repository.path());
+        let source_path = source_directory.path().join("(動画) [作家] サンプル.MKV");
+        std::fs::write(&source_path, b"\x1a\x45\xdf\xa3\x93\x42\x82\x88matroska")
+            .expect("write sample Matroska file");
+
+        let ImportOutcome::Imported {
+            archive_id,
+            source_removed,
+            ..
+        } = import_archive(repository.path(), &source_path)
+            .await
+            .expect("import video")
+        else {
+            panic!("expected video to be imported");
+        };
+        assert!(source_removed);
+        assert!(!source_path.exists());
+
+        let connection =
+            rusqlite::Connection::open(repository.path().join("database/library.sqlite3"))
+                .expect("open database");
+        let (format, page_count, thumbnail): (String, Option<u64>, Option<String>) = connection
+            .query_row(
+                "SELECT format, page_count, thumbnail_relative_path
+                 FROM archives WHERE archive_id = ?1",
+                [&archive_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read video metadata");
+        assert_eq!(format, "mkv");
+        assert_eq!(page_count, None);
+        assert_eq!(thumbnail, None);
+        let mut statement = connection
+            .prepare(
+                "SELECT category, name FROM archive_tags
+                 JOIN tags ON tags.id = archive_tags.tag_id
+                 WHERE archive_id = ?1 ORDER BY category",
+            )
+            .expect("prepare tag query");
+        let tags: Vec<(String, String)> = statement
+            .query_map([archive_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query tags")
+            .collect::<Result<_, _>>()
+            .expect("collect tags");
+        assert_eq!(
+            tags,
+            vec![
+                ("author".to_string(), "作家".to_string()),
+                ("classification".to_string(), "動画".to_string())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn imports_video_with_same_stem_package_image() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        let source_directory = tempfile::tempdir().expect("temporary source");
+        initialize_repository(repository.path());
+        let source_path = source_directory.path().join("[作家] サンプル.mp4");
+        let image_path = source_directory.path().join("[作家] サンプル.PNG");
+        std::fs::write(&source_path, b"\0\0\0\x18ftypisom0000").expect("write sample MP4 file");
+        let image = RgbImage::from_pixel(32, 48, image::Rgb([40, 100, 180]));
+        image::codecs::png::PngEncoder::new(
+            std::fs::File::create(&image_path).expect("create package image"),
+        )
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .expect("encode package image");
+
+        let ImportOutcome::Imported { archive_id, .. } = super::import_archive_with_thumbnail(
+            repository.path(),
+            &source_path,
+            Some(&image_path),
+        )
+        .await
+        .expect("import video with package image") else {
+            panic!("expected video to be imported");
+        };
+        assert!(image_path.exists(), "package image must remain in place");
+        let thumbnail = repository.path().join(format!(
+            "thumbnails/{}/{}.webp",
+            &archive_id[..2],
+            archive_id
+        ));
+        assert!(
+            thumbnail.exists(),
+            "thumbnail should be generated from image"
+        );
+        assert!(std::fs::read(thumbnail)
+            .expect("read thumbnail")
+            .starts_with(b"RIFF"));
     }
 
     #[tokio::test]

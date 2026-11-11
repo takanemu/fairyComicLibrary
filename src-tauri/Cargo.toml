@@ -20,6 +20,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 image = { version = "=0.25.8", default-features = false, features = ["avif-native", "bmp", "gif", "jpeg", "png", "rayon", "webp"] }
 pdfium-render = { version = "0.9.5", default-features = false, features = ["pdfium_8125", "image_025", "thread_safe"] }
 mobi = "0.8"
+matroska-demuxer = "0.8.1"
+mp4 = "0.14"
 libc = "0.2"
 webp = { version = "0.3.1", default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -33,6 +35,7 @@ zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 tauri-plugin-notification = "2"
 
 [dev-dependencies]
+base64 = "0.22"
 image = { version = "=0.25.8", default-features = false, features = ["avif"] }
 tempfile = "3"
 

@@ -6,6 +6,7 @@ mod library;
 mod maintenance;
 mod repository;
 mod thumbnails;
+mod video;
 
 use std::{
     borrow::Cow,
@@ -57,9 +58,11 @@ pub fn run() {
             commands::backup_repository,
             commands::unmanage_archives,
             commands::regenerate_thumbnail,
+            commands::set_package_image,
             commands::regenerate_missing_thumbnails,
             commands::list_cover_candidates,
             commands::open_in_viewer,
+            commands::get_video_duration,
             commands::convert_archive,
             commands::cancel_conversion,
         ])

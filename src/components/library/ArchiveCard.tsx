@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { ArchiveSummary, isEbook, thumbnailUrl } from "../../lib/library";
+import { ArchiveSummary, isEbook, isVideo, thumbnailUrl } from "../../lib/library";
+import thumbnailUnavailable from "../../assets/thumbnail-unavailable.svg";
 
 type Props = {
   archive: ArchiveSummary;
@@ -103,9 +104,11 @@ export function ArchiveCard({ archive, selected, onSelect, onOpen, onToggleFavor
               src={url}
             />
           ) : (
-            <span aria-hidden="true" className="text-3xl text-slate-600">
-              ◫
-            </span>
+            <img
+              alt="サムネイル未指定"
+              className="size-full object-cover"
+              src={thumbnailUnavailable}
+            />
           )}
         </div>
         <div className="px-3 py-2.5">
@@ -113,7 +116,9 @@ export function ArchiveCard({ archive, selected, onSelect, onOpen, onToggleFavor
             {displayFilename}
           </p>
           <p className="mt-1 text-[10px] uppercase tracking-wide text-slate-500">
-            {isEbook(archive.format)
+            {isVideo(archive.format)
+              ? "動画"
+              : isEbook(archive.format)
               ? "電子書籍"
               : archive.pageCount === null
                 ? "ページ数不明"

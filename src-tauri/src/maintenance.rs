@@ -499,6 +499,11 @@ pub fn regenerate_thumbnail(
     let connection = Connection::open(root.join(DATABASE))
         .map_err(|error| format!("SQLiteデータベースを開けませんでした: {error}"))?;
     let record = archive_record(&connection, archive_id)?;
+    if matches!(record.format.as_str(), "mkv" | "mp4") {
+        return Err(
+            "動画のサムネイルは、動画と同名のパッケージ画像を選択してください。".to_string(),
+        );
+    }
     let archive_path = archive_file(root, &record)?;
 
     let staging_directory = root.join("thumbnails/.staging");
@@ -536,23 +541,127 @@ pub fn regenerate_thumbnail(
     Ok(())
 }
 
+pub fn set_package_image(root: &Path, archive_id: &str, image_path: &Path) -> Result<(), String> {
+    let mut connection = Connection::open(root.join(DATABASE))
+        .map_err(|error| format!("SQLiteデータベースを開けませんでした: {error}"))?;
+    let record = archive_record(&connection, archive_id)?;
+    if !matches!(record.format.as_str(), "mkv" | "mp4") {
+        return Err("パッケージ画像を設定できるのは動画ファイルのみです。".to_string());
+    }
+
+    let staging_directory = root.join("thumbnails/.staging");
+    fs::create_dir_all(&staging_directory)
+        .map_err(|error| format!("サムネイル用一時ディレクトリを作成できませんでした: {error}"))?;
+    let staging = staging_directory.join(format!("{archive_id}.package.part"));
+    if let Err(error) = crate::thumbnails::create_thumbnail_from_file(image_path, &staging) {
+        let _ = fs::remove_file(&staging);
+        return Err(error);
+    }
+
+    let relative = format!("thumbnails/{}/{}.webp", &archive_id[..2], archive_id);
+    let destination = root.join(&relative);
+    if let Err(error) = fs::create_dir_all(destination.parent().unwrap_or(root)) {
+        let _ = fs::remove_file(&staging);
+        return Err(format!("サムネイルの保存先を作成できませんでした: {error}"));
+    }
+    let transaction = connection.transaction().map_err(|error| {
+        let _ = fs::remove_file(&staging);
+        format!("パッケージ画像のDB更新を開始できませんでした: {error}")
+    })?;
+    if let Err(error) = transaction.execute(
+        "UPDATE archives SET thumbnail_relative_path = ?1 WHERE archive_id = ?2",
+        rusqlite::params![relative, archive_id],
+    ) {
+        let _ = fs::remove_file(&staging);
+        return Err(format!(
+            "パッケージ画像の参照をDBへ記録できませんでした: {error}"
+        ));
+    }
+    let had_previous = match fs::symlink_metadata(&destination) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            let _ = fs::remove_file(&staging);
+            return Err(format!("既存のサムネイルを確認できませんでした: {error}"));
+        }
+    };
+    let backup = staging_directory.join(format!(
+        "{archive_id}.package.{}.{}.backup",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    if had_previous {
+        if let Err(error) = fs::rename(&destination, &backup) {
+            let _ = fs::remove_file(&staging);
+            return Err(format!("既存のサムネイルを保護できませんでした: {error}"));
+        }
+    }
+    if let Err(error) = fs::rename(&staging, &destination) {
+        let restore = if had_previous {
+            fs::rename(&backup, &destination).err()
+        } else {
+            None
+        };
+        let _ = fs::remove_file(&staging);
+        return Err(format!(
+            "パッケージ画像をサムネイルとして保存できませんでした: {error}{}",
+            restore
+                .map(|error| format!(" 既存画像の復元にも失敗しました: {error}"))
+                .unwrap_or_default()
+        ));
+    }
+    if let Err(error) = transaction.commit() {
+        let remove = fs::remove_file(&destination).err();
+        let restore = if had_previous {
+            fs::rename(&backup, &destination).err()
+        } else {
+            None
+        };
+        return Err(format!(
+            "パッケージ画像のDB更新を確定できませんでした: {error}{}{}",
+            remove
+                .map(|error| format!(" 新しいサムネイルも削除できませんでした: {error}"))
+                .unwrap_or_default(),
+            restore
+                .map(|error| format!(" 既存画像の復元にも失敗しました: {error}"))
+                .unwrap_or_default()
+        ));
+    }
+    if had_previous {
+        if let Err(error) = fs::remove_file(&backup) {
+            eprintln!("旧パッケージ画像の一時バックアップを削除できませんでした: {error}");
+        }
+    }
+    Ok(())
+}
+
 // サムネイルが未登録、またはファイルが欠けているアーカイブを、自動抽出の規則で作り直す。
 pub fn regenerate_missing_thumbnails(root: &Path) -> Result<RegenerateSummary, String> {
     let ids = {
         let connection = Connection::open(root.join(DATABASE))
             .map_err(|error| format!("SQLiteデータベースを開けませんでした: {error}"))?;
         let mut statement = connection
-            .prepare("SELECT archive_id, thumbnail_relative_path FROM archives")
+            .prepare("SELECT archive_id, format, thumbnail_relative_path FROM archives")
             .map_err(|error| format!("アーカイブ情報を確認できませんでした: {error}"))?;
         let rows = statement
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
             })
             .map_err(|error| format!("アーカイブ情報を確認できませんでした: {error}"))?;
         let mut ids = Vec::new();
         for row in rows {
-            let (id, thumbnail) =
+            let (id, format, thumbnail) =
                 row.map_err(|error| format!("アーカイブ情報を読み取れませんでした: {error}"))?;
+            if matches!(format.as_str(), "mkv" | "mp4") {
+                continue;
+            }
             let present = thumbnail
                 .as_deref()
                 .is_some_and(|path| is_safe_relative(path) && root.join(path).is_file());
@@ -708,8 +817,11 @@ fn copy_repository(root: &Path, destination: &Path) -> Result<BackupSummary, Str
 
 #[cfg(test)]
 mod tests {
-    use super::{backup, unmanage_archives, verify};
+    use super::{
+        backup, regenerate_missing_thumbnails, set_package_image, unmanage_archives, verify,
+    };
     use crate::repository;
+    use image::{ImageEncoder, RgbImage};
     use rusqlite::Connection;
     use std::fs;
 
@@ -744,6 +856,53 @@ mod tests {
         assert_eq!(warnings.len(), 2);
         assert!(warnings[0].contains("archives/ab/book.cbz"));
         assert!(warnings[1].contains("thumbnails/ab/x.webp"));
+    }
+
+    #[test]
+    fn video_without_package_image_is_valid_and_can_be_assigned_one() {
+        let repo = tempfile::tempdir().expect("temporary repository");
+        repository::open(repo.path()).expect("initialize repository");
+        let id = "cd".repeat(32);
+        let relative = format!("archives/{}/video.mp4", &id[..2]);
+        fs::create_dir_all(repo.path().join(format!("archives/{}", &id[..2]))).unwrap();
+        fs::write(repo.path().join(&relative), b"video").unwrap();
+        Connection::open(repo.path().join("database/library.sqlite3"))
+            .unwrap()
+            .execute(
+                "INSERT INTO archives (archive_id, original_filename, relative_path, format,
+                    file_size, thumbnail_relative_path, imported_at)
+                 VALUES (?1, 'video.mp4', ?2, 'mp4', 5, NULL, '2026-01-01T00:00:00Z')",
+                rusqlite::params![id, relative],
+            )
+            .unwrap();
+
+        assert!(verify(repo.path()).unwrap().warnings.is_empty());
+        let missing = regenerate_missing_thumbnails(repo.path()).unwrap();
+        assert_eq!(missing.regenerated, 0);
+        assert_eq!(missing.failed, 0);
+
+        let image_path = repo.path().join("package.png");
+        let image = RgbImage::from_pixel(32, 48, image::Rgb([20, 120, 200]));
+        image::codecs::png::PngEncoder::new(fs::File::create(&image_path).unwrap())
+            .write_image(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        set_package_image(repo.path(), &id, &image_path).expect("set package image");
+        let thumbnail = repo
+            .path()
+            .join(format!("thumbnails/{}/{}.webp", &id[..2], id));
+        let saved = fs::read(&thumbnail).expect("read generated thumbnail");
+        assert!(saved.starts_with(b"RIFF"));
+        assert!(verify(repo.path()).unwrap().warnings.is_empty());
+
+        let invalid_image = repo.path().join("invalid.txt");
+        fs::write(&invalid_image, b"not an image").unwrap();
+        assert!(set_package_image(repo.path(), &id, &invalid_image).is_err());
+        assert_eq!(fs::read(thumbnail).unwrap(), saved);
     }
 
     #[test]

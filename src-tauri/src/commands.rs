@@ -41,6 +41,7 @@ pub fn open_repository(
 #[tauri::command]
 pub async fn import_archive(
     path: String,
+    thumbnail_path: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<crate::importing::ImportOutcome, String> {
     let repository_path = state
@@ -53,7 +54,13 @@ pub async fn import_archive(
         .ok_or_else(|| "先にアプリ管理リポジトリを選択してください。".to_string())?;
 
     let _import_guard = state.import_lock.lock().await;
-    crate::importing::import_archive(&repository_path, &PathBuf::from(path)).await
+    let thumbnail_path = thumbnail_path.map(PathBuf::from);
+    crate::importing::import_archive_with_thumbnail(
+        &repository_path,
+        &PathBuf::from(path),
+        thumbnail_path.as_deref(),
+    )
+    .await
 }
 
 fn current_repository(state: &State<'_, AppState>) -> Result<PathBuf, String> {
@@ -65,6 +72,13 @@ fn current_repository(state: &State<'_, AppState>) -> Result<PathBuf, String> {
         })?
         .clone()
         .ok_or_else(|| "先にアプリ管理リポジトリを選択してください。".to_string())
+}
+
+#[tauri::command(async)]
+pub fn get_video_duration(archive_id: String, state: State<'_, AppState>) -> Result<u64, String> {
+    let root = current_repository(&state)?;
+    let (path, format) = crate::maintenance::archive_for_open(&root, &archive_id)?;
+    crate::video::duration_seconds(&path, &format)
 }
 
 #[tauri::command(async)]
@@ -183,6 +197,19 @@ pub async fn regenerate_thumbnail(
 }
 
 #[tauri::command]
+pub async fn set_package_image(
+    archive_id: String,
+    image_path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let image_path = PathBuf::from(image_path);
+    with_exclusive_repository(&state, move |root| {
+        crate::maintenance::set_package_image(&root, &archive_id, &image_path)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn regenerate_missing_thumbnails(
     state: State<'_, AppState>,
 ) -> Result<crate::maintenance::RegenerateSummary, String> {
@@ -197,19 +224,24 @@ pub async fn regenerate_missing_thumbnails(
 pub fn open_in_viewer(archive_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let root = current_repository(&state)?;
     let (archive, format) = crate::maintenance::archive_for_open(&root, &archive_id)?;
-    if matches!(format.as_str(), "epub" | "azw3") {
+    if matches!(format.as_str(), "epub" | "azw3" | "mkv" | "mp4") {
+        let application = if matches!(format.as_str(), "mkv" | "mp4") {
+            "動画プレーヤー"
+        } else {
+            "電子書籍リーダー"
+        };
         let output = std::process::Command::new("xdg-open")
             .arg(&archive)
             .output()
             .map_err(|error| {
-                format!("OSに関連付けられた電子書籍リーダーを起動できませんでした: {error}")
+                format!("OSに関連付けられた{application}を起動できませんでした: {error}")
             })?;
         if !output.status.success() {
             let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
             return Err(if detail.is_empty() {
-                "OSに関連付けられた電子書籍リーダーを起動できませんでした。EPUB / AZW3に対応するアプリを関連付けてください。".to_string()
+                format!("OSに関連付けられた{application}を起動できませんでした。対応するアプリを関連付けてください。")
             } else {
-                format!("OSに関連付けられた電子書籍リーダーを起動できませんでした: {detail}")
+                format!("OSに関連付けられた{application}を起動できませんでした: {detail}")
             });
         }
     } else {

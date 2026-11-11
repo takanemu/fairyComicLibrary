@@ -12,6 +12,7 @@ import {
   removeTagFromArchives,
   regenerateThumbnail,
   isConvertible,
+  setPackageImage,
   setFavorite,
   unmanageArchives,
 } from "../../lib/library";
@@ -335,6 +336,12 @@ export function LibraryView({
             mutate(
               () => regenerateThumbnail(selected[0].archiveId, entryName),
               "表紙を作り直せませんでした",
+            )
+          }
+          onSetPackageImage={(path) =>
+            mutate(
+              () => setPackageImage(selected[0].archiveId, path),
+              "パッケージ画像を設定できませんでした",
             )
           }
           onToggleFavorite={() => void toggleFavorite(selected[0])}

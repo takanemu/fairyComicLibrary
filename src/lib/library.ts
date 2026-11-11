@@ -86,6 +86,19 @@ export const listArchives = (query: ArchiveQuery) =>
 export const openInViewer = (archiveId: string) =>
 invoke<void>("open_in_viewer", { archiveId });
 
+export const getVideoDuration = (archiveId: string) =>
+  invoke<number>("get_video_duration", { archiveId });
+
+export function formatDuration(seconds: number): string {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  const pad = (value: number) => value.toString().padStart(2, "0");
+  return hours > 0
+    ? `${hours}:${pad(minutes)}:${pad(remainingSeconds)}`
+    : `${minutes}:${pad(remainingSeconds)}`;
+}
+
 export const listTags = () => invoke<TagWithCount[]>("list_tags");
 
 export const setFavorite = (archiveId: string, isFavorite: boolean) =>
@@ -131,6 +144,11 @@ export const regenerateThumbnail = async (
   entryName: string | null = null,
 ) => {
   await invoke<void>("regenerate_thumbnail", { archiveId, entryName });
+  thumbnailRevisions.set(archiveId, Date.now());
+};
+
+export const setPackageImage = async (archiveId: string, imagePath: string) => {
+  await invoke<void>("set_package_image", { archiveId, imagePath });
   thumbnailRevisions.set(archiveId, Date.now());
 };
 
@@ -208,3 +226,4 @@ export const cancelConversion = () => invoke<void>("cancel_conversion");
 
 export const isConvertible = (format: string) => format === "zip" || format === "cbz";
 export const isEbook = (format: string) => format === "epub" || format === "azw3";
+export const isVideo = (format: string) => format === "mkv" || format === "mp4";

@@ -1,14 +1,19 @@
 import { CoverPicker } from "./CoverPicker";
 import { FormEvent, useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArchiveSummary,
   TagCategory,
   formatFileSize,
+  formatDuration,
+  getVideoDuration,
   isEbook,
+  isVideo,
   isConvertible,
   tagCategories,
   thumbnailUrl,
 } from "../../lib/library";
+import thumbnailUnavailable from "../../assets/thumbnail-unavailable.svg";
 
 type Props = {
   archive: ArchiveSummary;
@@ -20,6 +25,7 @@ type Props = {
   onAddTag: (category: TagCategory, name: string) => Promise<void>;
   onRemoveTag: (tagId: number) => Promise<void>;
   onRegenerateCover: (entryName: string | null) => Promise<void>;
+  onSetPackageImage: (path: string) => Promise<void>;
   onConvert: () => void;
   onUnmanage: () => void;
   unmanageBusy: boolean;
@@ -35,14 +41,37 @@ export function ArchiveDetail({
   onAddTag,
   onRemoveTag,
   onRegenerateCover,
+  onSetPackageImage,
   onConvert,
   onUnmanage,
   unmanageBusy,
 }: Props) {
   const [coverBusy, setCoverBusy] = useState(false);
   const [picking, setPicking] = useState(false);
+  const [packageImageError, setPackageImageError] = useState<string | null>(null);
+  const [duration, setDuration] = useState<
+    { archiveId: string; seconds: number } | { archiveId: string; error: string } | null
+  >(null);
   const isPdf = archive.format === "pdf";
   const isBook = isEbook(archive.format);
+  const isVideoFile = isVideo(archive.format);
+
+  useEffect(() => {
+    if (!isVideoFile) return;
+    let active = true;
+    const archiveId = archive.archiveId;
+    setDuration(null);
+    getVideoDuration(archiveId)
+      .then((seconds) => {
+        if (active) setDuration({ archiveId, seconds });
+      })
+      .catch((error: unknown) => {
+        if (active) setDuration({ archiveId, error: String(error) });
+      });
+    return () => {
+      active = false;
+    };
+  }, [archive.archiveId, isVideoFile]);
 
   async function regenerate(entryName: string | null) {
     setPicking(false);
@@ -51,6 +80,32 @@ export function ArchiveDetail({
       await onRegenerateCover(entryName);
     } finally {
       setCoverBusy(false);
+    }
+  }
+
+  async function choosePackageImage() {
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        title: "パッケージ画像を選択",
+        filters: [
+          {
+            name: "画像",
+            extensions: ["png", "webp", "jpg", "jpeg", "gif", "bmp"],
+          },
+        ],
+      });
+      if (typeof selected !== "string") return;
+      setPackageImageError(null);
+      setCoverBusy(true);
+      try {
+        await onSetPackageImage(selected);
+      } finally {
+        setCoverBusy(false);
+      }
+    } catch (reason) {
+      setPackageImageError(`パッケージ画像を設定できませんでした: ${String(reason)}`);
     }
   }
 
@@ -85,11 +140,11 @@ export function ArchiveDetail({
   return (
     <>
       <aside
-        aria-label="アーカイブの詳細"
+        aria-label="作品の詳細"
         className="fixed bottom-0 right-0 top-[calc(3rem+3.5rem)] z-40 flex w-80 flex-col overflow-hidden border-l border-white/[0.07] bg-black/90 shadow-2xl backdrop-blur-md"
       >
         <div className="flex shrink-0 items-center justify-between p-5 pb-4">
-          <h2 className="text-sm font-semibold text-slate-100">アーカイブの詳細</h2>
+          <h2 className="text-sm font-semibold text-slate-100">作品の詳細</h2>
           <button
             aria-label="閉じる"
             className="grid size-8 place-items-center rounded-full text-sm text-slate-300 transition hover:bg-white/[0.08] focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300"
@@ -102,11 +157,17 @@ export function ArchiveDetail({
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-28">
           <div className="relative mb-4 min-h-12">
-            {archive.hasThumbnail && (
+            {archive.hasThumbnail ? (
               <img
                 alt=""
                 className="w-full rounded-xl border border-white/[0.06] object-cover"
                 src={thumbnailUrl(archive.archiveId)}
+              />
+            ) : (
+              <img
+                alt="サムネイル未指定"
+                className="w-full rounded-xl border border-white/[0.06] object-cover"
+                src={thumbnailUnavailable}
               />
             )}
           </div>
@@ -125,15 +186,29 @@ export function ArchiveDetail({
               <dd className="uppercase text-slate-300">{archive.format}</dd>
             </div>
             <div className="flex justify-between">
-              <dt>{isBook ? "種別" : "ページ数"}</dt>
+              <dt>{isVideoFile || isBook ? "種別" : "ページ数"}</dt>
               <dd className="text-slate-300">
-                {isBook
-                  ? "電子書籍"
-                  : archive.pageCount === null
-                    ? "不明"
-                    : `${archive.pageCount} ページ`}
+                {isVideoFile
+                  ? "動画"
+                  : isBook
+                    ? "電子書籍"
+                    : archive.pageCount === null
+                      ? "不明"
+                      : `${archive.pageCount} ページ`}
               </dd>
             </div>
+            {isVideoFile && (
+              <div className="flex justify-between gap-2">
+                <dt>再生時間</dt>
+                <dd className="text-right text-slate-300">
+                  {duration?.archiveId !== archive.archiveId
+                    ? "取得中…"
+                    : "error" in duration
+                      ? <span title={duration.error}>取得できません（{duration.error}）</span>
+                      : formatDuration(duration.seconds)}
+                </dd>
+              </div>
+            )}
             <div className="flex justify-between">
               <dt>サイズ</dt>
               <dd className="text-slate-300">{formatFileSize(archive.fileSize)}</dd>
@@ -145,7 +220,7 @@ export function ArchiveDetail({
               </dd>
             </div>
             <div className="flex justify-between">
-              <dt>最終読書日時</dt>
+              <dt>{isVideoFile ? "最終再生日時" : "最終読書日時"}</dt>
               <dd className="text-slate-300">
                 {archive.lastReadAt
                   ? new Date(archive.lastReadAt).toLocaleString("ja-JP")
@@ -153,7 +228,7 @@ export function ArchiveDetail({
               </dd>
             </div>
             <div className="flex justify-between">
-              <dt>読書回数</dt>
+              <dt>{isVideoFile ? "再生回数" : "読書回数"}</dt>
               <dd className="text-slate-300">{archive.readCount} 回</dd>
             </div>
           </dl>
@@ -163,7 +238,7 @@ export function ArchiveDetail({
             onClick={onOpen}
             type="button"
           >
-            アーカイブを開く
+            ファイルを開く
           </button>
 
           <button
@@ -188,28 +263,46 @@ export function ArchiveDetail({
             {unmanageBusy ? "移動中…" : "管理対象外にする（ダウンロードへ移動）"}
           </button>
 
-          <div className={`mt-2 flex gap-2 ${isPdf || isBook ? "flex-col" : ""}`}>
-            <button
-              className={`${isPdf || isBook ? "w-full" : "flex-1"} rounded-lg border border-white/[0.08] px-2 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:opacity-50`}
-              disabled={coverBusy}
-              onClick={() => void regenerate(null)}
-              title="自動抽出の規則で表紙を作り直します"
-              type="button"
-            >
-              {coverBusy ? "作成中…" : "表紙を再作成"}
-            </button>
-            {!isPdf && !isBook && (
+          {isVideoFile ? (
+            <>
               <button
-                className="flex-1 rounded-lg border border-white/[0.08] px-2 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:opacity-50"
+                className="mt-2 w-full rounded-lg border border-white/[0.08] px-2 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:opacity-50"
                 disabled={coverBusy}
-                onClick={() => setPicking(true)}
-                title="アーカイブ内の画像から表紙を手動で選びます"
+                onClick={() => void choosePackageImage()}
                 type="button"
               >
-                表紙を選ぶ
+                {coverBusy ? "設定中…" : "パッケージ画像を選ぶ"}
               </button>
-            )}
-          </div>
+              {packageImageError && (
+                <p className="mt-2 text-xs text-rose-300" role="alert">
+                  {packageImageError}
+                </p>
+              )}
+            </>
+          ) : (
+            <div className={`mt-2 flex gap-2 ${isPdf || isBook ? "flex-col" : ""}`}>
+              <button
+                className={`${isPdf || isBook ? "w-full" : "flex-1"} rounded-lg border border-white/[0.08] px-2 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:opacity-50`}
+                disabled={coverBusy}
+                onClick={() => void regenerate(null)}
+                title="自動抽出の規則で表紙を作り直します"
+                type="button"
+              >
+                {coverBusy ? "作成中…" : "表紙を再作成"}
+              </button>
+              {!isPdf && !isBook && (
+                <button
+                  className="flex-1 rounded-lg border border-white/[0.08] px-2 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:opacity-50"
+                  disabled={coverBusy}
+                  onClick={() => setPicking(true)}
+                  title="アーカイブ内の画像から表紙を手動で選びます"
+                  type="button"
+                >
+                  表紙を選ぶ
+                </button>
+              )}
+            </div>
+          )}
           {isConvertible(archive.format) && (
             <button
               className="mt-2 w-full rounded-lg border border-white/[0.08] px-2 py-2 text-xs font-medium text-white transition hover:bg-white/[0.05] disabled:opacity-50"

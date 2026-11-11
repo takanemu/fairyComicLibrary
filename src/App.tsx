@@ -56,6 +56,22 @@ type ImportOutcome =
       relativePath: string;
     };
 
+const videoExtensions = new Set(["mkv", "mp4"]);
+const packageImageExtensions = new Set(["png", "webp", "jpg", "jpeg", "gif", "bmp"]);
+
+function extensionOf(path: string) {
+  const filename = path.split("/").pop() ?? "";
+  const dot = filename.lastIndexOf(".");
+  return dot < 0 ? "" : filename.slice(dot + 1).toLowerCase();
+}
+
+function packageImageKey(path: string) {
+  const separator = path.lastIndexOf("/");
+  const filename = path.slice(separator + 1);
+  const dot = filename.lastIndexOf(".");
+  return `${path.slice(0, separator)}/${dot < 0 ? filename : filename.slice(0, dot)}`;
+}
+
 async function notify(title: string, body: string) {
   if (!("__TAURI_INTERNALS__" in window)) {
     return;
@@ -402,11 +418,37 @@ function App() {
       let duplicateCount = 0;
       let failedCount = 0;
       let firstFailure: string | null = null;
+      const candidates = new Map<string, string[]>();
+      const videosByKey = new Map<string, number>();
+      for (const path of paths) {
+        const extension = extensionOf(path);
+        const key = packageImageKey(path);
+        if (videoExtensions.has(extension)) {
+          videosByKey.set(key, (videosByKey.get(key) ?? 0) + 1);
+        } else if (packageImageExtensions.has(extension)) {
+          candidates.set(key, [...(candidates.get(key) ?? []), path]);
+        }
+      }
+      const matchedImages = new Set<string>();
+      const packageImageByVideo = new Map<string, string>();
+      for (const path of paths) {
+        if (!videoExtensions.has(extensionOf(path))) continue;
+        const key = packageImageKey(path);
+        const images = candidates.get(key) ?? [];
+        if (images.length > 0) {
+          images.forEach((image) => matchedImages.add(image));
+        }
+        if (images.length === 1 && videosByKey.get(key) === 1) {
+          packageImageByVideo.set(path, images[0]);
+        }
+      }
 
       for (const path of paths) {
+        if (matchedImages.has(path)) continue;
         try {
           const outcome = await invoke<ImportOutcome>("import_archive", {
             path,
+            thumbnailPath: packageImageByVideo.get(path) ?? null,
           });
           if (outcome.status === "duplicate") {
             duplicateCount += 1;
@@ -487,8 +529,11 @@ function App() {
         title: "インポートするアーカイブを選択",
         filters: [
           {
-            name: "アーカイブ",
-            extensions: ["7z", "zip", "rar", "cbz", "cbr", "pdf", "epub", "azw3"],
+            name: "作品とパッケージ画像",
+            extensions: [
+              "7z", "zip", "rar", "cbz", "cbr", "pdf", "epub", "azw3",
+              "mkv", "mp4", "png", "webp", "jpg", "jpeg", "gif", "bmp",
+            ],
           },
         ],
       });

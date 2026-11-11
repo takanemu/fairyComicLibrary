@@ -40,6 +40,46 @@ pub fn create_thumbnail(
     write_thumbnail(image_bytes, output_path)
 }
 
+pub fn create_thumbnail_from_file(image_path: &Path, output_path: &Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(image_path)
+        .map_err(|error| format!("パッケージ画像を確認できませんでした: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(
+            "パッケージ画像にはシンボリックリンクではない通常ファイルを選択してください。"
+                .to_string(),
+        );
+    }
+    let extension = image_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "対応する画像形式（PNG、WebP、JPEGなど）を選択してください。".to_string())?;
+    if !matches!(
+        extension.as_str(),
+        "png" | "webp" | "jpg" | "jpeg" | "gif" | "bmp"
+    ) {
+        return Err(format!(
+            "対応していないパッケージ画像形式です: .{extension}"
+        ));
+    }
+    let mut image_file = File::open(image_path)
+        .map_err(|error| format!("パッケージ画像を開けませんでした: {error}"))?;
+    let size = image_file
+        .metadata()
+        .map_err(|error| format!("パッケージ画像の情報を取得できませんでした: {error}"))?
+        .len();
+    if size > MAX_IMAGE_ENTRY_BYTES {
+        return Err(format!(
+            "パッケージ画像のサイズが上限（{MAX_IMAGE_ENTRY_BYTES} bytes）を超えています。"
+        ));
+    }
+    let mut bytes = Vec::with_capacity(size as usize);
+    image_file
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("パッケージ画像を読み込めませんでした: {error}"))?;
+    write_thumbnail(bytes, output_path)
+}
+
 fn pdfium() -> Result<&'static Pdfium, String> {
     PDFIUM
         .get_or_init(|| {
@@ -253,7 +293,7 @@ pub fn count_pages(archive_path: &Path, format: &str) -> Result<Option<u64>, Str
             }
             Some(count)
         }
-        "epub" | "azw3" => None,
+        "epub" | "azw3" | "mkv" | "mp4" => None,
         _ => return Err(unsupported(format)),
     };
     Ok(count)
