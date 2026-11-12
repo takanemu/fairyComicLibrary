@@ -9,7 +9,16 @@ export const tagCategories: { value: TagCategory; label: string }[] = [
 ];
 
 export type Tag = { id: number; name: string; category: TagCategory };
-export type TagWithCount = Tag & { archiveCount: number };
+export type TagWithCount = Tag & {
+  archiveCount: number;
+  groupId: number | null;
+};
+export type TagGroup = {
+  id: number;
+  name: string;
+  category: TagCategory;
+  parentId: number | null;
+};
 
 export type ArchiveSummary = {
   archiveId: string;
@@ -100,6 +109,20 @@ export function formatDuration(seconds: number): string {
 }
 
 export const listTags = () => invoke<TagWithCount[]>("list_tags");
+export const listTagGroups = () => invoke<TagGroup[]>("list_tag_groups");
+export const createTagGroup = (
+  category: TagCategory,
+  name: string,
+  parentId: number | null = null,
+) => invoke<TagGroup>("create_tag_group", { category, name, parentId });
+export const renameTagGroup = (groupId: number, name: string) =>
+  invoke<void>("rename_tag_group", { groupId, name });
+export const deleteTagGroup = (groupId: number) =>
+  invoke<void>("delete_tag_group", { groupId });
+export const moveTag = (tagId: number, parentId: number | null) =>
+  invoke<void>("move_tag", { tagId, parentId });
+export const moveTagGroup = (groupId: number, parentId: number | null) =>
+  invoke<void>("move_tag_group", { groupId, parentId });
 
 export const setFavorite = (archiveId: string, isFavorite: boolean) =>
   invoke<void>("set_favorite", { archiveId, isFavorite });

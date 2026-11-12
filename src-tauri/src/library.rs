@@ -41,6 +41,16 @@ pub struct TagWithCount {
     pub name: String,
     pub category: String,
     pub archive_count: u64,
+    pub group_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagGroup {
+    pub id: i64,
+    pub name: String,
+    pub category: String,
+    pub parent_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -314,7 +324,7 @@ pub fn list_tags(repository_root: &Path) -> Result<Vec<TagWithCount>, String> {
     let connection = open(repository_root)?;
     let mut statement = connection
         .prepare(
-            "SELECT t.id, t.name, t.category, COUNT(x.archive_id)
+            "SELECT t.id, t.name, t.category, COUNT(x.archive_id), t.group_id
              FROM tags t LEFT JOIN archive_tags x ON x.tag_id = t.id
              GROUP BY t.id
              ORDER BY t.category, t.name COLLATE NOCASE",
@@ -327,11 +337,203 @@ pub fn list_tags(repository_root: &Path) -> Result<Vec<TagWithCount>, String> {
                 name: row.get(1)?,
                 category: row.get(2)?,
                 archive_count: row.get::<_, i64>(3)?.max(0) as u64,
+                group_id: row.get(4)?,
             })
         })
         .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
         .map_err(|error| format!("タグ一覧を読み取れませんでした: {error}"))?;
     Ok(tags)
+}
+
+pub fn list_tag_groups(repository_root: &Path) -> Result<Vec<TagGroup>, String> {
+    let connection = open(repository_root)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, name, category, parent_id FROM tag_groups
+             ORDER BY category, name COLLATE NOCASE, id",
+        )
+        .map_err(|error| format!("タググループ一覧の問い合わせを準備できませんでした: {error}"))?;
+    statement
+        .query_map([], |row| {
+            Ok(TagGroup {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                category: row.get(2)?,
+                parent_id: row.get(3)?,
+            })
+        })
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(|error| format!("タググループ一覧を読み取れませんでした: {error}"))
+}
+
+fn validate_group_parent(
+    connection: &Connection,
+    category: &str,
+    parent_id: Option<i64>,
+) -> Result<(), String> {
+    if let Some(parent_id) = parent_id {
+        let parent_category = connection
+            .query_row(
+                "SELECT category FROM tag_groups WHERE id = ?1",
+                [parent_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| format!("親グループを確認できませんでした: {error}"))?
+            .ok_or_else(|| "移動先のグループが見つかりません。".to_string())?;
+        if parent_category != category {
+            return Err("異なる分類のグループ間では移動できません。".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_group_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("グループ名を入力してください。".to_string());
+    }
+    if name.chars().count() > MAX_TAG_NAME_CHARS {
+        return Err(format!(
+            "グループ名は{MAX_TAG_NAME_CHARS}文字以内にしてください。"
+        ));
+    }
+    Ok(name.to_string())
+}
+
+pub fn create_tag_group(
+    repository_root: &Path,
+    category: &str,
+    name: &str,
+    parent_id: Option<i64>,
+) -> Result<TagGroup, String> {
+    if !TAG_CATEGORIES.contains(&category) {
+        return Err("タグの分類が不正です。".to_string());
+    }
+    let name = validate_group_name(name)?;
+    let mut connection = open(repository_root)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("タググループの作成を開始できませんでした: {error}"))?;
+    validate_group_parent(&transaction, category, parent_id)?;
+    transaction
+        .execute(
+            "INSERT INTO tag_groups (name, category, parent_id) VALUES (?1, ?2, ?3)",
+            params![name, category, parent_id],
+        )
+        .map_err(|error| format!("タググループを作成できませんでした: {error}"))?;
+    let id = transaction.last_insert_rowid();
+    transaction
+        .commit()
+        .map_err(|error| format!("タググループの作成を確定できませんでした: {error}"))?;
+    Ok(TagGroup {
+        id,
+        name,
+        category: category.to_string(),
+        parent_id,
+    })
+}
+
+pub fn rename_tag_group(repository_root: &Path, group_id: i64, name: &str) -> Result<(), String> {
+    let name = validate_group_name(name)?;
+    let connection = open(repository_root)?;
+    let changed = connection
+        .execute(
+            "UPDATE tag_groups SET name = ?1 WHERE id = ?2",
+            params![name, group_id],
+        )
+        .map_err(|error| format!("タググループ名を変更できませんでした: {error}"))?;
+    if changed == 0 {
+        return Err("タググループが見つかりません。".to_string());
+    }
+    Ok(())
+}
+
+pub fn delete_tag_group(repository_root: &Path, group_id: i64) -> Result<(), String> {
+    let connection = open(repository_root)?;
+    let occupied: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM tag_groups WHERE parent_id = ?1)
+                OR EXISTS(SELECT 1 FROM tags WHERE group_id = ?1)",
+            [group_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("タググループの内容を確認できませんでした: {error}"))?;
+    if occupied {
+        return Err(
+            "タグまたはサブグループがあるグループは削除できません。先に移動してください。"
+                .to_string(),
+        );
+    }
+    let changed = connection
+        .execute("DELETE FROM tag_groups WHERE id = ?1", [group_id])
+        .map_err(|error| format!("タググループを削除できませんでした: {error}"))?;
+    if changed == 0 {
+        return Err("タググループが見つかりません。".to_string());
+    }
+    Ok(())
+}
+
+pub fn move_tag(repository_root: &Path, tag_id: i64, parent_id: Option<i64>) -> Result<(), String> {
+    let connection = open(repository_root)?;
+    let category = connection
+        .query_row("SELECT category FROM tags WHERE id = ?1", [tag_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(|error| format!("タグを確認できませんでした: {error}"))?
+        .ok_or_else(|| "移動するタグが見つかりません。".to_string())?;
+    validate_group_parent(&connection, &category, parent_id)?;
+    connection
+        .execute(
+            "UPDATE tags SET group_id = ?1 WHERE id = ?2",
+            params![parent_id, tag_id],
+        )
+        .map_err(|error| format!("タグを移動できませんでした: {error}"))?;
+    Ok(())
+}
+
+pub fn move_tag_group(
+    repository_root: &Path,
+    group_id: i64,
+    parent_id: Option<i64>,
+) -> Result<(), String> {
+    let connection = open(repository_root)?;
+    let category = connection
+        .query_row(
+            "SELECT category FROM tag_groups WHERE id = ?1",
+            [group_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("タググループを確認できませんでした: {error}"))?
+        .ok_or_else(|| "移動するタググループが見つかりません。".to_string())?;
+    validate_group_parent(&connection, &category, parent_id)?;
+    if let Some(parent_id) = parent_id {
+        let is_descendant: bool = connection
+            .query_row(
+                "WITH RECURSIVE descendants(id) AS (
+                    SELECT id FROM tag_groups WHERE id = ?1
+                    UNION
+                    SELECT child.id FROM tag_groups child
+                    JOIN descendants parent ON child.parent_id = parent.id
+                 )
+                 SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?2)",
+                params![group_id, parent_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("移動先の階層を確認できませんでした: {error}"))?;
+        if is_descendant {
+            return Err("グループを自分自身または配下へ移動することはできません。".to_string());
+        }
+    }
+    connection
+        .execute(
+            "UPDATE tag_groups SET parent_id = ?1 WHERE id = ?2",
+            params![parent_id, group_id],
+        )
+        .map_err(|error| format!("タググループを移動できませんでした: {error}"))?;
+    Ok(())
 }
 
 pub fn set_favorite(
@@ -488,8 +690,9 @@ pub fn remove_tag_from_archives(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_tag, add_tag_to_archives, list_archives, list_tags, remove_tag,
-        remove_tag_from_archives, set_favorite, ArchiveQuery, SortBy, SortDirection,
+        add_tag, add_tag_to_archives, create_tag_group, delete_tag_group, list_archives,
+        list_tag_groups, list_tags, move_tag, move_tag_group, remove_tag, remove_tag_from_archives,
+        rename_tag_group, set_favorite, ArchiveQuery, SortBy, SortDirection,
     };
     use crate::database;
     use rusqlite::{params, Connection};
@@ -752,6 +955,55 @@ mod tests {
 
         remove_tag_from_archives(repository.path(), &ids, tag.id).expect("remove tag");
         assert!(list_tags(repository.path()).expect("list tags").is_empty());
+    }
+
+    #[test]
+    fn groups_tags_without_changing_tag_identity_or_unused_tag_cleanup() {
+        let repository = repository_with_archives();
+        let root = repository.path();
+        let parent = create_tag_group(root, "author", "Regions", None).expect("create group");
+        let child =
+            create_tag_group(root, "author", "Japan", Some(parent.id)).expect("create subgroup");
+        let first = id(0);
+        let second = id(1);
+        let tag = add_tag(root, &first, "author", "Shared author").expect("add tag");
+        let same_tag =
+            add_tag(root, &second, "author", "Shared author").expect("reuse same-category tag");
+        assert_eq!(tag.id, same_tag.id);
+
+        move_tag(root, tag.id, Some(child.id)).expect("move tag into group");
+        assert_eq!(
+            list_tags(root).expect("list tags")[0].group_id,
+            Some(child.id)
+        );
+        assert!(
+            move_tag_group(root, parent.id, Some(child.id)).is_err(),
+            "a group cannot be moved into its descendant"
+        );
+        rename_tag_group(root, child.id, "Domestic").expect("rename group");
+        assert_eq!(
+            list_tag_groups(root)
+                .expect("list groups")
+                .into_iter()
+                .find(|group| group.id == child.id)
+                .expect("renamed group")
+                .name,
+            "Domestic"
+        );
+
+        remove_tag_from_archives(root, &[first, second], tag.id).expect("remove tag links");
+        assert!(list_tags(root).expect("list tags after cleanup").is_empty());
+        assert_eq!(
+            list_tag_groups(root)
+                .expect("groups remain after tag cleanup")
+                .len(),
+            2
+        );
+        delete_tag_group(root, child.id).expect("delete empty subgroup");
+        delete_tag_group(root, parent.id).expect("delete empty parent");
+        assert!(list_tag_groups(root)
+            .expect("list deleted groups")
+            .is_empty());
     }
 
     #[test]

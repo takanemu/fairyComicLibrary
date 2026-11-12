@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 pub fn initialize(path: &Path) -> Result<u64, String> {
     let connection = Connection::open(path)
@@ -148,6 +148,50 @@ pub fn initialize(path: &Path) -> Result<u64, String> {
             .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
     }
 
+    let current = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+        .map_err(|error| format!("SQLiteスキーマバージョンを読み取れませんでした: {error}"))?;
+    if current < 5 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLiteスキーマの更新を開始できませんでした: {error}"))?;
+        transaction
+            .execute_batch(
+                "
+                CREATE TABLE tag_groups (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    category TEXT NOT NULL CHECK(category IN ('author', 'series', 'classification')),
+                    parent_id INTEGER REFERENCES tag_groups(id) ON DELETE RESTRICT
+                );
+                ALTER TABLE tags ADD COLUMN group_id INTEGER REFERENCES tag_groups(id) ON DELETE SET NULL;
+                CREATE INDEX idx_tag_groups_parent ON tag_groups(category, parent_id, name);
+                CREATE INDEX idx_tags_group ON tags(group_id, name);
+                PRAGMA user_version = 5;
+                ",
+            )
+            .map_err(|error| format!("SQLiteスキーマをv5へ更新できませんでした: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
+    }
+
+    let tag_groups_exists = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tag_groups'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| format!("SQLiteテーブルを検証できませんでした: {error}"))?
+        .is_some();
+    if !tag_groups_exists {
+        return Err(
+            "リポジトリのSQLiteデータベースに必要なテーブル 'tag_groups' がありません。DBが破損している可能性があります。"
+                .to_string(),
+        );
+    }
+
     connection
         .query_row("SELECT COUNT(*) FROM archives", [], |row| {
             row.get::<_, u64>(0)
@@ -261,6 +305,66 @@ mod tests {
             .expect("read new fields");
         assert_eq!(last_read_at, None);
         assert_eq!(read_count, 0);
+    }
+
+    #[test]
+    fn migrates_v4_tags_without_losing_archive_links() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        let database_path = repository.path().join("library.sqlite3");
+        let connection = Connection::open(&database_path).expect("create v4 database");
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE archives (
+                    archive_id TEXT PRIMARY KEY,
+                    original_filename TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    format TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    imported_at TEXT NOT NULL
+                );
+                CREATE TABLE tags (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    UNIQUE(category, name)
+                );
+                CREATE TABLE archive_tags (
+                    archive_id TEXT NOT NULL REFERENCES archives(archive_id) ON DELETE CASCADE,
+                    tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                    PRIMARY KEY (archive_id, tag_id)
+                );
+                INSERT INTO archives VALUES (
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'legacy.cbz', 'archives/aa/legacy.cbz', 'cbz', 42, '2026-10-24T00:00:00Z'
+                );
+                INSERT INTO tags (id, name, category) VALUES (7, 'Existing author', 'author');
+                INSERT INTO archive_tags VALUES (
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 7
+                );
+                PRAGMA user_version = 4;
+                ",
+            )
+            .expect("create v4 schema");
+        drop(connection);
+
+        assert_eq!(initialize(&database_path).expect("migrate v4 database"), 1);
+        let connection = Connection::open(database_path).expect("open migrated database");
+        let version = connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .expect("read migrated schema version");
+        let (group_id, linked_count): (Option<i64>, i64) = connection
+            .query_row(
+                "SELECT
+                    (SELECT group_id FROM tags WHERE id = 7),
+                    (SELECT COUNT(*) FROM archive_tags WHERE tag_id = 7)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read migrated tag data");
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(group_id, None);
+        assert_eq!(linked_count, 1);
     }
 
     #[test]

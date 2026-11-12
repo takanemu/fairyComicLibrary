@@ -994,6 +994,16 @@ mod tests {
         let repository = tempfile::tempdir().expect("temporary repository");
         let source_directory = tempfile::tempdir().expect("temporary source");
         initialize_repository(repository.path());
+        let nested_group =
+            crate::library::create_tag_group(repository.path(), "author", "Nested", None)
+                .expect("create nested author group");
+        rusqlite::Connection::open(repository.path().join("database/library.sqlite3"))
+            .expect("open database")
+            .execute(
+                "INSERT INTO tags (name, category, group_id) VALUES ('作家', 'author', ?1)",
+                [nested_group.id],
+            )
+            .expect("create pre-existing grouped tag");
         let source_path = source_directory
             .path()
             .join("(動画)(同人) [作家][原作] {シリーズA}{シリーズB} サンプル.MKV");
@@ -1027,6 +1037,14 @@ mod tests {
         assert_eq!(format, "mkv");
         assert_eq!(page_count, None);
         assert_eq!(thumbnail, None);
+        let group_id: Option<i64> = connection
+            .query_row(
+                "SELECT group_id FROM tags WHERE category = 'author' AND name = '作家'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read existing grouped tag");
+        assert_eq!(group_id, Some(nested_group.id));
         let mut statement = connection
             .prepare(
                 "SELECT category, name FROM archive_tags

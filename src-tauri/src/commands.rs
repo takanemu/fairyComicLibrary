@@ -95,6 +95,53 @@ pub fn list_tags(state: State<'_, AppState>) -> Result<Vec<library::TagWithCount
 }
 
 #[tauri::command(async)]
+pub fn list_tag_groups(state: State<'_, AppState>) -> Result<Vec<library::TagGroup>, String> {
+    library::list_tag_groups(&current_repository(&state)?)
+}
+
+#[tauri::command(async)]
+pub fn create_tag_group(
+    category: String,
+    name: String,
+    parent_id: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<library::TagGroup, String> {
+    library::create_tag_group(&current_repository(&state)?, &category, &name, parent_id)
+}
+
+#[tauri::command(async)]
+pub fn rename_tag_group(
+    group_id: i64,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    library::rename_tag_group(&current_repository(&state)?, group_id, &name)
+}
+
+#[tauri::command(async)]
+pub fn delete_tag_group(group_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    library::delete_tag_group(&current_repository(&state)?, group_id)
+}
+
+#[tauri::command(async)]
+pub fn move_tag(
+    tag_id: i64,
+    parent_id: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    library::move_tag(&current_repository(&state)?, tag_id, parent_id)
+}
+
+#[tauri::command(async)]
+pub fn move_tag_group(
+    group_id: i64,
+    parent_id: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    library::move_tag_group(&current_repository(&state)?, group_id, parent_id)
+}
+
+#[tauri::command(async)]
 pub fn set_favorite(
     archive_id: String,
     is_favorite: bool,

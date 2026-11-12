@@ -11,14 +11,22 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import importButtonIcon from "./assets/book-import.png";
 import { ConvertResult } from "./components/library/ConvertDialog";
 import { LibraryView } from "./components/library/LibraryView";
+import { TagTree } from "./components/library/TagTree";
 import {
   ArchiveQuery,
   ArchiveSortBy,
   SortDirection,
   TagCategory,
   TagWithCount,
+  TagGroup,
+  createTagGroup,
+  deleteTagGroup,
   listTags,
+  listTagGroups,
   loadSort,
+  moveTag,
+  moveTagGroup,
+  renameTagGroup,
   saveSort,
   cancelConversion,
   formatFileSize,
@@ -58,6 +66,24 @@ type ImportOutcome =
 
 const videoExtensions = new Set(["mkv", "mp4"]);
 const packageImageExtensions = new Set(["png", "webp", "jpg", "jpeg", "gif", "bmp"]);
+const SIDEBAR_WIDTH_KEY = "fairyComicLibrary.sidebarWidth";
+
+function loadSidebarWidth() {
+  try {
+    const saved = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+    return Number.isFinite(saved) && saved >= 200 && saved <= 420 ? saved : 256;
+  } catch {
+    return 256;
+  }
+}
+
+function saveSidebarWidth(width: number) {
+  try {
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width));
+  } catch {
+    // 保存できなくても表示には影響させない。
+  }
+}
 
 function extensionOf(path: string) {
   const filename = path.split("/").pop() ?? "";
@@ -125,6 +151,11 @@ function App() {
   const [sortDirection, setSortDirection] = useState<SortDirection>(
     initialSort.sortDirection,
   );
+  const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
+  const sidebarWidthRef = useRef(sidebarWidth);
+  const sidebarElementRef = useRef<HTMLElement | null>(null);
+  const sidebarSeparatorRef = useRef<HTMLDivElement | null>(null);
+  const isResizingSidebarRef = useRef(false);
   useEffect(() => {
     saveSort({ sortBy, sortDirection });
   }, [sortBy, sortDirection]);
@@ -133,6 +164,7 @@ function App() {
   const [search, setSearch] = useState("");
   const [tagIds, setTagIds] = useState<number[]>([]);
   const [tags, setTags] = useState<TagWithCount[]>([]);
+  const [tagGroups, setTagGroups] = useState<TagGroup[]>([]);
   const [expandedTagCategories, setExpandedTagCategories] = useState<
     Record<TagCategory, boolean>
   >({ author: true, series: true, classification: true });
@@ -356,6 +388,56 @@ function App() {
 
   const bumpVersion = useCallback(() => setVersion((current) => current + 1), []);
 
+  async function createGroup(category: TagCategory, name: string, parentId: number | null) {
+    setError(null);
+    try {
+      await createTagGroup(category, name, parentId);
+      bumpVersion();
+    } catch (reason) {
+      setError(`グループを作成できませんでした: ${String(reason)}`);
+    }
+  }
+
+  async function renameGroup(groupId: number, name: string) {
+    setError(null);
+    try {
+      await renameTagGroup(groupId, name);
+      bumpVersion();
+    } catch (reason) {
+      setError(`グループを更新できませんでした: ${String(reason)}`);
+    }
+  }
+
+  async function removeGroup(groupId: number) {
+    setError(null);
+    try {
+      await deleteTagGroup(groupId);
+      bumpVersion();
+    } catch (reason) {
+      setError(`グループを削除できませんでした: ${String(reason)}`);
+    }
+  }
+
+  async function relocateGroup(groupId: number, parentId: number | null) {
+    setError(null);
+    try {
+      await moveTagGroup(groupId, parentId);
+      bumpVersion();
+    } catch (reason) {
+      setError(`グループを移動できませんでした: ${String(reason)}`);
+    }
+  }
+
+  async function updateTagParent(tagId: number, parentId: number | null) {
+    setError(null);
+    try {
+      await moveTag(tagId, parentId);
+      bumpVersion();
+    } catch (reason) {
+      setError(`タグを移動できませんでした: ${String(reason)}`);
+    }
+  }
+
   useEffect(() => {
     const timer = window.setTimeout(() => setSearch(searchText), 250);
     return () => window.clearTimeout(timer);
@@ -365,15 +447,17 @@ function App() {
   useEffect(() => {
     if (!hasRepository) {
       setTags([]);
+      setTagGroups([]);
       return;
     }
     let cancelled = false;
-    listTags()
-      .then((result) => {
+    Promise.all([listTags(), listTagGroups()])
+      .then(([result, groupResult]) => {
         if (cancelled) {
           return;
         }
         setTags(result);
+        setTagGroups(groupResult);
         setTagIds((current) => {
           const remaining = current.filter((id) =>
             result.some((tag) => tag.id === id),
@@ -546,6 +630,26 @@ function App() {
     }
   }
 
+  function toggleTagGroup(ids: number[]) {
+    if (ids.length === 0) return;
+    setTagIds((current) => {
+      const selectedAll = ids.every((id) => current.includes(id));
+      return selectedAll
+        ? current.filter((id) => !ids.includes(id))
+        : [...new Set([...current, ...ids])];
+    });
+  }
+
+  function finishSidebarResize() {
+    if (!isResizingSidebarRef.current) return;
+    isResizingSidebarRef.current = false;
+    setSidebarWidth(sidebarWidthRef.current);
+    saveSidebarWidth(sidebarWidthRef.current);
+    if (sidebarSeparatorRef.current) {
+      sidebarSeparatorRef.current.style.backgroundColor = "";
+    }
+  }
+
   return (
     <div className="relative flex h-screen overflow-hidden bg-canvas text-slate-100">
       {isDragging && (
@@ -558,7 +662,11 @@ function App() {
           </p>
         </div>
       )}
-      <aside className="flex h-full w-64 shrink-0 flex-col border-r border-white/5 bg-sidebar px-5 py-6">
+      <aside
+        ref={sidebarElementRef}
+        className="flex h-full shrink-0 flex-col border-r border-white/5 bg-sidebar px-3 py-6 sm:px-5"
+        style={{ width: sidebarWidth }}
+      >
         <nav aria-label="メインナビゲーション" className="space-y-1">
           {navigation.map((item) => (
             <button
@@ -580,13 +688,13 @@ function App() {
           ))}
         </nav>
 
-        {tags.length > 0 && (
+        {repository && (
           <div className="mt-6 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
             {tagCategories.map((category) => {
               const items = tags.filter((tag) => tag.category === category.value);
-              if (items.length === 0) {
-                return null;
-              }
+              const groups = tagGroups.filter(
+                (group) => group.category === category.value,
+              );
               const expanded = expandedTagCategories[category.value];
               const selectedCount = items.filter((tag) => tagIds.includes(tag.id)).length;
               const categoryId = `tag-category-${category.value}`;
@@ -609,37 +717,41 @@ function App() {
                       {category.label}
                       <span className="text-[10px] tracking-normal text-slate-600">
                         {selectedCount > 0 ? `${selectedCount}/` : ""}
-                        {items.length}
+                        {items.length} タグ
                       </span>
                     </span>
                   </button>
                   <div
-                    className="space-y-0.5"
                     hidden={!expanded}
                     id={categoryId}
                   >
-                    {items.map((tag) => (
-                      <button
-                        aria-pressed={tagIds.includes(tag.id)}
-                        className={`flex w-full items-center justify-between gap-2 rounded-lg px-3 py-1.5 text-left text-xs transition ${
-                          tagIds.includes(tag.id)
-                            ? "bg-violet-400/15 text-violet-100"
-                            : "text-slate-400 hover:bg-white/[0.04] hover:text-slate-200"
-                        }`}
-                        key={tag.id}
-                        onClick={() =>
-                          setTagIds((current) =>
-                            current.includes(tag.id)
-                              ? current.filter((id) => id !== tag.id)
-                              : [...current, tag.id],
-                          )
-                        }
-                        type="button"
-                      >
-                        <span className="truncate">{tag.name}</span>
-                        <span className="text-[10px] text-slate-600">{tag.archiveCount}</span>
-                      </button>
-                    ))}
+                    <TagTree
+                      category={category.value}
+                      groups={groups}
+                      onCreateGroup={(name, parentId) =>
+                        void createGroup(category.value, name, parentId)
+                      }
+                      onDeleteGroup={(id) => void removeGroup(id)}
+                      onMoveGroup={(id, parentId) =>
+                        void relocateGroup(id, parentId)
+                      }
+                      onMoveTag={(id, parentId) =>
+                        void updateTagParent(id, parentId)
+                      }
+                      onRenameGroup={(id, name) =>
+                        void renameGroup(id, name)
+                      }
+                      onToggleGroup={toggleTagGroup}
+                      onToggleTag={(id) =>
+                        setTagIds((current) =>
+                          current.includes(id)
+                            ? current.filter((value) => value !== id)
+                            : [...current, id],
+                        )
+                      }
+                      selectedTagIds={tagIds}
+                      tags={items}
+                    />
                   </div>
                 </div>
               );
@@ -681,7 +793,58 @@ function App() {
           )}
         </div>
       </aside>
-
+      <div
+        aria-label="サイドバーの幅を変更"
+        aria-orientation="vertical"
+        aria-valuemax={420}
+        aria-valuemin={200}
+        aria-valuenow={sidebarWidth}
+        className="z-10 w-1 shrink-0 cursor-col-resize touch-none bg-white/[0.03] transition-colors hover:bg-violet-300/40"
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft") {
+            const width = Math.max(200, sidebarWidthRef.current - 16);
+            sidebarWidthRef.current = width;
+            setSidebarWidth(width);
+            if (sidebarElementRef.current) {
+              sidebarElementRef.current.style.width = `${width}px`;
+            }
+            event.currentTarget.setAttribute("aria-valuenow", String(width));
+            saveSidebarWidth(width);
+          } else if (event.key === "ArrowRight") {
+            const width = Math.min(420, sidebarWidthRef.current + 16);
+            sidebarWidthRef.current = width;
+            setSidebarWidth(width);
+            if (sidebarElementRef.current) {
+              sidebarElementRef.current.style.width = `${width}px`;
+            }
+            event.currentTarget.setAttribute("aria-valuenow", String(width));
+            saveSidebarWidth(width);
+          }
+        }}
+        ref={sidebarSeparatorRef}
+        onPointerDown={(event) => {
+          event.preventDefault();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          isResizingSidebarRef.current = true;
+          event.currentTarget.style.backgroundColor = "rgb(196 181 253 / 0.5)";
+        }}
+        onPointerMove={(event) => {
+          if (!isResizingSidebarRef.current) return;
+          const maximum = Math.min(420, window.innerWidth - 320);
+          const width = Math.max(200, Math.min(maximum, event.clientX));
+          sidebarWidthRef.current = width;
+          if (sidebarElementRef.current) {
+            sidebarElementRef.current.style.width = `${width}px`;
+          }
+          event.currentTarget.setAttribute("aria-valuenow", String(width));
+        }}
+        onPointerUp={finishSidebarResize}
+        onPointerCancel={finishSidebarResize}
+        onLostPointerCapture={finishSidebarResize}
+        role="separator"
+        tabIndex={0}
+        title="ドラッグしてサイドバーの幅を変更"
+      />
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header
           className="flex h-12 shrink-0 cursor-move select-none items-center justify-between border-b border-white/5 pl-10 pr-3"
