@@ -124,6 +124,42 @@ fn escape_like(text: &str) -> String {
     escaped
 }
 
+fn group_tags_by_category(
+    connection: &Connection,
+    tag_ids: &[i64],
+) -> Result<HashMap<String, Vec<i64>>, String> {
+    if tag_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let ids_str = tag_ids
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT category, id FROM tags WHERE id IN ({}) ORDER BY category",
+            ids_str
+        ))
+        .map_err(|error| format!("タグカテゴリの取得に失敗しました: {error}"))?;
+
+    let mut categories: HashMap<String, Vec<i64>> = HashMap::new();
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|error| format!("タグを読み取れませんでした: {error}"))?;
+
+    for row in rows {
+        let (category, tag_id) =
+            row.map_err(|error| format!("タグを読み取れませんでした: {error}"))?;
+        categories.entry(category).or_default().push(tag_id);
+    }
+
+    Ok(categories)
+}
+
 pub fn list_archives(
     repository_root: &Path,
     query: &ArchiveQuery,
@@ -133,8 +169,7 @@ pub fn list_archives(
         .search
         .as_deref()
         .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(escape_like);
+        .filter(|text| !text.is_empty());
     let sort_column = match query.sort_by {
         SortBy::FileSize => "a.file_size",
         SortBy::ImportedAt => "a.imported_at",
@@ -151,107 +186,239 @@ pub fn list_archives(
     } else {
         format!("{sort_column} {direction}, a.archive_id ASC")
     };
-    let limit = if query.recent_only { RECENT_LIMIT } else { -1 };
 
-    // 同じ分類内は OR、異なる分類の間は AND。数値のみを埋め込むためSQLインジェクションは起きない。
+    // タグをカテゴリごとにグループ化し、各カテゴリについて EXISTS 条件を生成
     let tag_filter = if query.tag_ids.is_empty() {
         String::new()
     } else {
-        let ids = query
-            .tag_ids
-            .iter()
-            .map(i64::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        format!(
-            "AND (SELECT COUNT(DISTINCT t.category) FROM archive_tags x
-                  JOIN tags t ON t.id = x.tag_id
-                  WHERE x.archive_id = a.archive_id AND t.id IN ({ids}))
-                = (SELECT COUNT(DISTINCT category) FROM tags WHERE id IN ({ids}))"
-        )
+        let tag_by_category = group_tags_by_category(&connection, &query.tag_ids)?;
+        let mut conditions = Vec::new();
+
+        for (category, ids) in tag_by_category.iter() {
+            let ids_str = ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            conditions.push(format!(
+                "EXISTS(SELECT 1 FROM archive_tags x JOIN tags t ON t.id = x.tag_id
+                        WHERE x.archive_id = a.archive_id AND t.category = '{category}' AND t.id IN ({ids_str}))"
+            ));
+        }
+
+        format!("AND {}", conditions.join(" AND "))
     };
-    let sql = format!(
-        "WITH matching AS (
-             SELECT a.* FROM archives a
-             WHERE (:favorites = 0 OR a.is_favorite = 1)
-               {tag_filter}
-               AND (:search IS NULL
-                    OR a.original_filename LIKE :search ESCAPE '\\'
-                    OR EXISTS (
-                        SELECT 1 FROM archive_tags x JOIN tags t ON t.id = x.tag_id
-                        WHERE x.archive_id = a.archive_id AND t.name LIKE :search ESCAPE '\\'))
-         )
-         SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
-                a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
-                a.thumbnail_relative_path IS NOT NULL
-         FROM matching a
-         WHERE (:recent_only = 0 OR a.archive_id IN (
-                SELECT archive_id FROM matching
-                ORDER BY imported_at DESC, archive_id ASC LIMIT {RECENT_LIMIT}))
-         ORDER BY {order_by}
-         LIMIT :limit"
-    );
+
+    let (sql, params_vec) = if let Some(search_term) = search {
+        let fts_exists = connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_index'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| format!("検索インデックスを確認できませんでした: {error}"))?
+            .is_some();
+
+        if fts_exists {
+            let fts_query = format!("{}*", search_term.replace('*', "").replace('"', ""));
+            let sql = if query.recent_only {
+                format!(
+                    "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
+                            a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
+                            a.thumbnail_relative_path IS NOT NULL
+                     FROM archives a
+                     WHERE (:favorites = 0 OR a.is_favorite = 1)
+                       {tag_filter}
+                       AND a.archive_id IN (
+                           SELECT archive_id FROM search_index
+                           WHERE search_index MATCH ?1
+                       )
+                     ORDER BY a.imported_at DESC, a.archive_id ASC
+                     LIMIT {RECENT_LIMIT}"
+                )
+            } else {
+                format!(
+                    "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
+                            a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
+                            a.thumbnail_relative_path IS NOT NULL
+                     FROM archives a
+                     WHERE (:favorites = 0 OR a.is_favorite = 1)
+                       {tag_filter}
+                       AND a.archive_id IN (
+                           SELECT archive_id FROM search_index
+                           WHERE search_index MATCH ?1
+                       )
+                     ORDER BY {order_by}
+                     LIMIT :limit"
+                )
+            };
+            (sql, vec![fts_query])
+        } else {
+            let escaped = escape_like(search_term);
+            let sql = if query.recent_only {
+                format!(
+                    "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
+                            a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
+                            a.thumbnail_relative_path IS NOT NULL
+                     FROM archives a
+                     WHERE (:favorites = 0 OR a.is_favorite = 1)
+                       {tag_filter}
+                       AND a.original_filename LIKE ?1 ESCAPE '\\'
+                     ORDER BY a.imported_at DESC, a.archive_id ASC
+                     LIMIT {RECENT_LIMIT}"
+                )
+            } else {
+                format!(
+                    "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
+                            a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
+                            a.thumbnail_relative_path IS NOT NULL
+                     FROM archives a
+                     WHERE (:favorites = 0 OR a.is_favorite = 1)
+                       {tag_filter}
+                       AND a.original_filename LIKE ?1 ESCAPE '\\'
+                     ORDER BY {order_by}
+                     LIMIT :limit"
+                )
+            };
+            (sql, vec![escaped])
+        }
+    } else {
+        let sql = if query.recent_only {
+            format!(
+                "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
+                        a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
+                        a.thumbnail_relative_path IS NOT NULL
+                 FROM archives a
+                 WHERE (:favorites = 0 OR a.is_favorite = 1)
+                   {tag_filter}
+                 ORDER BY a.imported_at DESC, a.archive_id ASC
+                 LIMIT {RECENT_LIMIT}"
+            )
+        } else {
+            format!(
+                "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
+                        a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
+                        a.thumbnail_relative_path IS NOT NULL
+                 FROM archives a
+                 WHERE (:favorites = 0 OR a.is_favorite = 1)
+                   {tag_filter}
+                 ORDER BY {order_by}
+                 LIMIT :limit"
+            )
+        };
+        (sql, vec![])
+    };
+
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| format!("アーカイブ一覧の問い合わせを準備できませんでした: {error}"))?;
-    let mut archives = statement
-        .query_map(
-            named_params! {
-                ":favorites": query.favorites_only as i64,
-                ":recent_only": query.recent_only as i64,
-                ":search": search,
-                ":limit": limit,
-            },
-            |row| {
-                Ok(ArchiveSummary {
-                    archive_id: row.get(0)?,
-                    filename: row.get(1)?,
-                    format: row.get(2)?,
-                    page_count: row
-                        .get::<_, Option<i64>>(3)?
-                        .map(|count| count.max(0) as u64),
-                    file_size: row.get::<_, i64>(4)?.max(0) as u64,
-                    imported_at: row.get(5)?,
-                    last_read_at: row.get(6)?,
-                    read_count: row.get::<_, i64>(7)?.max(0) as u64,
-                    is_favorite: row.get::<_, i64>(8)? != 0,
-                    has_thumbnail: row.get::<_, i64>(9)? != 0,
-                    tags: Vec::new(),
-                })
-            },
-        )
-        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-        .map_err(|error| format!("アーカイブ一覧を読み取れませんでした: {error}"))?;
 
-    let mut tag_statement = connection
-        .prepare(
+    let limit = if query.recent_only { -1 } else { RECENT_LIMIT as i64 };
+    let mut archives = if params_vec.is_empty() {
+        statement
+            .query_map(
+                named_params! {
+                    ":favorites": query.favorites_only as i64,
+                    ":limit": limit,
+                },
+                |row| {
+                    Ok(ArchiveSummary {
+                        archive_id: row.get(0)?,
+                        filename: row.get(1)?,
+                        format: row.get(2)?,
+                        page_count: row
+                            .get::<_, Option<i64>>(3)?
+                            .map(|count| count.max(0) as u64),
+                        file_size: row.get::<_, i64>(4)?.max(0) as u64,
+                        imported_at: row.get(5)?,
+                        last_read_at: row.get(6)?,
+                        read_count: row.get::<_, i64>(7)?.max(0) as u64,
+                        is_favorite: row.get::<_, i64>(8)? != 0,
+                        has_thumbnail: row.get::<_, i64>(9)? != 0,
+                        tags: Vec::new(),
+                    })
+                },
+            )
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+    } else {
+        let search_param = params_vec[0].clone();
+        statement
+            .query_map(
+                rusqlite::params![
+                    search_param,
+                    query.favorites_only as i64,
+                    limit,
+                ],
+                |row| {
+                    Ok(ArchiveSummary {
+                        archive_id: row.get(0)?,
+                        filename: row.get(1)?,
+                        format: row.get(2)?,
+                        page_count: row
+                            .get::<_, Option<i64>>(3)?
+                            .map(|count| count.max(0) as u64),
+                        file_size: row.get::<_, i64>(4)?.max(0) as u64,
+                        imported_at: row.get(5)?,
+                        last_read_at: row.get(6)?,
+                        read_count: row.get::<_, i64>(7)?.max(0) as u64,
+                        is_favorite: row.get::<_, i64>(8)? != 0,
+                        has_thumbnail: row.get::<_, i64>(9)? != 0,
+                        tags: Vec::new(),
+                    })
+                },
+            )
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+    }
+    .map_err(|error| format!("アーカイブ一覧を読み取れませんでした: {error}"))?;
+
+    if !archives.is_empty() {
+        let archive_ids = archives
+            .iter()
+            .map(|a| a.archive_id.clone())
+            .collect::<Vec<_>>();
+        let ids_param = archive_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let tag_sql = format!(
             "SELECT x.archive_id, t.id, t.name, t.category
              FROM archive_tags x JOIN tags t ON t.id = x.tag_id
-             ORDER BY t.category, t.name COLLATE NOCASE",
-        )
-        .map_err(|error| format!("タグの問い合わせを準備できませんでした: {error}"))?;
-    let mut tags_by_archive: HashMap<String, Vec<TagSummary>> = HashMap::new();
-    let tag_rows = tag_statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                TagSummary {
-                    id: row.get(1)?,
-                    name: row.get(2)?,
-                    category: row.get(3)?,
-                },
-            ))
-        })
-        .map_err(|error| format!("タグを読み取れませんでした: {error}"))?;
-    for row in tag_rows {
-        let (archive_id, tag) =
-            row.map_err(|error| format!("タグを読み取れませんでした: {error}"))?;
-        tags_by_archive.entry(archive_id).or_default().push(tag);
-    }
-    for archive in &mut archives {
-        archive.tags = tags_by_archive
-            .remove(&archive.archive_id)
-            .unwrap_or_default();
+             WHERE x.archive_id IN ({})",
+            ids_param
+        );
+        let mut tag_statement = connection
+            .prepare(&tag_sql)
+            .map_err(|error| format!("タグの問い合わせを準備できませんでした: {error}"))?;
+        let mut tags_by_archive: HashMap<String, Vec<TagSummary>> = HashMap::new();
+        let tag_rows = tag_statement
+            .query_map(rusqlite::params_from_iter(archive_ids.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    TagSummary {
+                        id: row.get(1)?,
+                        name: row.get(2)?,
+                        category: row.get(3)?,
+                    },
+                ))
+            })
+            .map_err(|error| format!("タグを読み取れませんでした: {error}"))?;
+        for row in tag_rows {
+            let (archive_id, tag) =
+                row.map_err(|error| format!("タグを読み取れませんでした: {error}"))?;
+            tags_by_archive.entry(archive_id).or_default().push(tag);
+        }
+        for archive in &mut archives {
+            if let Some(mut tags) = tags_by_archive.remove(&archive.archive_id) {
+                tags.sort_by(|a, b| {
+                    a.category.cmp(&b.category).then_with(|| {
+                        a.name.to_lowercase().cmp(&b.name.to_lowercase())
+                    })
+                });
+                archive.tags = tags;
+            }
+        }
     }
     Ok(archives)
 }

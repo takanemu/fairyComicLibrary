@@ -1,7 +1,7 @@
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_SCHEMA_VERSION: u32 = 9;
 
 pub fn initialize(path: &Path) -> Result<u64, String> {
     let connection = Connection::open(path)
@@ -176,6 +176,26 @@ pub fn initialize(path: &Path) -> Result<u64, String> {
             .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
     }
 
+    let current = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+        .map_err(|error| format!("SQLiteスキーマバージョンを読み取れませんでした: {error}"))?;
+    if current < 6 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLiteスキーマの更新を開始できませんでした: {error}"))?;
+        transaction
+            .execute_batch(
+                "
+                CREATE INDEX idx_archives_imported_at_id ON archives(imported_at DESC, archive_id ASC);
+                PRAGMA user_version = 6;
+                ",
+            )
+            .map_err(|error| format!("SQLiteスキーマをv6へ更新できませんでした: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
+    }
+
     let tag_groups_exists = connection
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tag_groups'",
@@ -190,6 +210,110 @@ pub fn initialize(path: &Path) -> Result<u64, String> {
             "リポジトリのSQLiteデータベースに必要なテーブル 'tag_groups' がありません。DBが破損している可能性があります。"
                 .to_string(),
         );
+    }
+
+    let current = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+        .map_err(|error| format!("SQLiteスキーマバージョンを読み取れませんでした: {error}"))?;
+    if current < 7 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLiteスキーマの更新を開始できませんでした: {error}"))?;
+        transaction
+            .execute_batch(
+                "
+                CREATE VIRTUAL TABLE search_index USING fts5(
+                    archive_id UNINDEXED,
+                    content='archives',
+                    content_rowid='rowid',
+                    original_filename,
+                    tag_name
+                );
+
+                CREATE INDEX idx_archives_original_filename ON archives(original_filename COLLATE NOCASE);
+                CREATE INDEX idx_archives_file_size ON archives(file_size DESC);
+                CREATE INDEX idx_archive_tags_tag_id ON archive_tags(tag_id);
+                PRAGMA user_version = 7;
+                ",
+            )
+            .map_err(|error| format!("SQLiteスキーマをv7へ更新できませんでした: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
+    }
+
+    let current = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+        .map_err(|error| format!("SQLiteスキーマバージョンを読み取れませんでした: {error}"))?;
+    if current < 8 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLiteスキーマの更新を開始できませんでした: {error}"))?;
+        transaction
+            .execute_batch(
+                "
+                CREATE INDEX idx_archives_file_size_id ON archives(file_size DESC, archive_id ASC);
+                CREATE INDEX idx_archives_last_read_at_id ON archives(last_read_at DESC, archive_id ASC);
+                CREATE INDEX idx_archives_read_count_id ON archives(read_count DESC, archive_id ASC);
+                CREATE INDEX idx_archives_original_filename_id ON archives(original_filename COLLATE NOCASE, archive_id ASC);
+                PRAGMA user_version = 8;
+                ",
+            )
+            .map_err(|error| format!("SQLiteスキーマをv8へ更新できませんでした: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
+    }
+
+    let current = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+        .map_err(|error| format!("SQLiteスキーマバージョンを読み取れませんでした: {error}"))?;
+    if current < 9 {
+        let db_dir = path.parent();
+        let repository_root = db_dir.and_then(|dir| dir.parent());
+        
+        // リポジトリ構造が整っている場合のみ移行を実行
+        if let Some(repo) = repository_root {
+            if repo.join("thumbnails").exists() && repo.join("archives").exists() {
+                drop(connection);
+                
+                crate::thumbnails::migrate_avif_thumbnails(repo)
+                    .map_err(|error| format!("AVIF→WebP移行に失敗しました: {error}"))?;
+                
+                let connection = Connection::open(path)
+                    .map_err(|error| format!("SQLiteデータベースを再度開けませんでした: {error}"))?;
+                connection
+                    .pragma_update(None, "foreign_keys", "ON")
+                    .map_err(|error| format!("SQLite外部キー制約を有効にできませんでした: {error}"))?;
+                
+                let transaction = connection
+                    .unchecked_transaction()
+                    .map_err(|error| format!("SQLiteスキーマの更新を開始できませんでした: {error}"))?;
+                transaction
+                    .execute_batch("PRAGMA user_version = 9;")
+                    .map_err(|error| format!("SQLiteスキーマをv9へ更新できませんでした: {error}"))?;
+                transaction
+                    .commit()
+                    .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
+                
+                return connection
+                    .query_row("SELECT COUNT(*) FROM archives", [], |row| {
+                        row.get::<_, u64>(0)
+                    })
+                    .map_err(|error| format!("SQLiteデータベースを読み取れませんでした: {error}"));
+            }
+        }
+        
+        // テストやリポジトリ構造がない場合：バージョンだけ上げて移行をスキップ
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLiteスキーマの更新を開始できませんでした: {error}"))?;
+        transaction
+            .execute_batch("PRAGMA user_version = 9;")
+            .map_err(|error| format!("SQLiteスキーマをv9へ更新できませんでした: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
     }
 
     connection

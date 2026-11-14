@@ -429,6 +429,22 @@ fn unmanage_archive(
                 "対象のアーカイブが見つからないため、DBから削除できませんでした。".to_string(),
             );
         }
+
+        let fts_exists = transaction
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_index'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap_or(None)
+            .is_some();
+        if fts_exists {
+            transaction
+                .execute("DELETE FROM search_index WHERE archive_id = ?1", [archive_id])
+                .map_err(|error| format!("検索インデックスを削除できませんでした: {error}"))?;
+        }
+
         transaction
             .execute(
                 "DELETE FROM tags

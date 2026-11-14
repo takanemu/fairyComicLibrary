@@ -1,4 +1,5 @@
 use crate::database::{self, CURRENT_SCHEMA_VERSION};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
@@ -72,8 +73,8 @@ pub fn open(path: &Path) -> Result<RepositoryStatus, String> {
     let database_path = root.join("database/library.sqlite3");
     let archive_count = database::initialize(&database_path)?;
     remove_stale_conversions(&root);
-    if let Err(error) = crate::thumbnails::migrate_avif_thumbnails(&root) {
-        eprintln!("旧サムネイルの移行を完了できませんでした: {error}");
+    if let Err(error) = rebuild_search_index(&database_path) {
+        eprintln!("検索インデックスの再構築に失敗しました: {error}");
     }
 
     let mut warnings = crate::maintenance::verify(&root)?.warnings;
@@ -145,6 +146,52 @@ fn read_saved_path(app: &AppHandle) -> Result<Option<PathBuf>, String> {
             "保存済みリポジトリの設定を読み取れませんでした: {error}"
         )),
     }
+}
+
+fn rebuild_search_index(database_path: &std::path::Path) -> Result<(), String> {
+    use rusqlite::Connection;
+
+    let mut connection = Connection::open(database_path)
+        .map_err(|error| format!("検索インデックスの再構築に必要なDBを開けません: {error}"))?;
+
+    let fts_exists = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_index'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| format!("検索インデックスの存在を確認できません: {error}"))?
+        .is_some();
+
+    if !fts_exists {
+        return Ok(());
+    }
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("トランザクションを開始できません: {error}"))?;
+
+    transaction
+        .execute_batch("DELETE FROM search_index")
+        .map_err(|error| format!("検索インデックスをクリアできません: {error}"))?;
+
+    transaction
+        .execute(
+            "INSERT INTO search_index (archive_id, original_filename, tag_name)
+             SELECT a.archive_id, a.original_filename, 
+                    COALESCE(GROUP_CONCAT(t.name, ' '), '') as tag_name
+             FROM archives a
+             LEFT JOIN archive_tags x ON a.archive_id = x.archive_id
+             LEFT JOIN tags t ON x.tag_id = t.id
+             GROUP BY a.archive_id",
+            [],
+        )
+        .map_err(|error| format!("検索インデックスを再構築できません: {error}"))?;
+
+    transaction
+        .commit()
+        .map_err(|error| format!("検索インデックスの再構築を確定できません: {error}"))
 }
 
 fn write_manifest(path: &Path) -> Result<(), String> {

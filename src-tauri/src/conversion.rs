@@ -847,6 +847,28 @@ fn register(
              SELECT ?1, tag_id FROM archive_tags WHERE archive_id = ?2",
             params![new_id, old_id],
         )?;
+
+        let fts_exists = transaction
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_index'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap_or(None)
+            .is_some();
+        if fts_exists {
+            transaction.execute(
+                "INSERT INTO search_index (archive_id, original_filename, tag_name)
+                 SELECT ?1, ?2, tag_name FROM search_index WHERE archive_id = ?3",
+                params![new_id, filename, old_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM search_index WHERE archive_id = ?1",
+                [old_id],
+            )?;
+        }
+
         transaction.execute("DELETE FROM archive_tags WHERE archive_id = ?1", [old_id])?;
         transaction.execute("DELETE FROM archives WHERE archive_id = ?1", [old_id])?;
         Ok(())

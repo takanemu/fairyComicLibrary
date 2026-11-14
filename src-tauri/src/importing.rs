@@ -762,6 +762,7 @@ fn register_archive(
         )
         .map_err(|error| format!("アーカイブ情報をDBへ登録できませんでした: {error}"))?;
     let (classifications, authors, series) = parse_filename_tags(filename);
+    let mut tag_names = Vec::new();
     for (category, names) in [
         ("classification", classifications),
         ("author", authors),
@@ -781,8 +782,29 @@ fn register_archive(
                     params![archive_id, name, category],
                 )
                 .map_err(|error| format!("タグを付けられませんでした: {error}"))?;
+            tag_names.push(name.to_string());
         }
     }
+
+    let tag_text = tag_names.join(" ");
+    let search_index_exists = transaction
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_index'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| format!("FTS5インデックスを検証できませんでした: {error}"))?
+        .is_some();
+    if search_index_exists {
+        transaction
+            .execute(
+                "INSERT INTO search_index (archive_id, original_filename, tag_name) VALUES (?1, ?2, ?3)",
+                params![archive_id, filename, tag_text],
+            )
+            .map_err(|error| format!("検索インデックスを更新できませんでした: {error}"))?;
+    }
+
     transaction
         .commit()
         .map_err(|error| format!("アーカイブ情報の登録を確定できませんでした: {error}"))
