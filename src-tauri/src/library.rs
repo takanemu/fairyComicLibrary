@@ -209,7 +209,7 @@ pub fn list_archives(
         format!("AND {}", conditions.join(" AND "))
     };
 
-    let (sql, params_vec) = if let Some(search_term) = search {
+    let (sql, search_param) = if let Some(search_term) = search {
         let fts_exists = connection
             .query_row(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_index'",
@@ -220,8 +220,12 @@ pub fn list_archives(
             .map_err(|error| format!("検索インデックスを確認できませんでした: {error}"))?
             .is_some();
 
-        if fts_exists {
-            let fts_query = format!("{}*", search_term.replace('*', "").replace('"', ""));
+        if fts_exists
+            && search_term
+                .chars()
+                .all(|character| character.is_alphanumeric() || character.is_whitespace())
+        {
+            let fts_query = format!("{search_term}*");
             let sql = if query.recent_only {
                 format!(
                     "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
@@ -232,7 +236,7 @@ pub fn list_archives(
                        {tag_filter}
                        AND a.archive_id IN (
                            SELECT archive_id FROM search_index
-                           WHERE search_index MATCH ?1
+                           WHERE search_index MATCH :search
                        )
                      ORDER BY a.imported_at DESC, a.archive_id ASC
                      LIMIT {RECENT_LIMIT}"
@@ -247,13 +251,13 @@ pub fn list_archives(
                        {tag_filter}
                        AND a.archive_id IN (
                            SELECT archive_id FROM search_index
-                           WHERE search_index MATCH ?1
+                           WHERE search_index MATCH :search
                        )
                      ORDER BY {order_by}
-                     LIMIT :limit"
+                     "
                 )
             };
-            (sql, vec![fts_query])
+            (sql, Some(fts_query))
         } else {
             let escaped = escape_like(search_term);
             let sql = if query.recent_only {
@@ -264,7 +268,7 @@ pub fn list_archives(
                      FROM archives a
                      WHERE (:favorites = 0 OR a.is_favorite = 1)
                        {tag_filter}
-                       AND a.original_filename LIKE ?1 ESCAPE '\\'
+                       AND a.original_filename LIKE :search ESCAPE '\\'
                      ORDER BY a.imported_at DESC, a.archive_id ASC
                      LIMIT {RECENT_LIMIT}"
                 )
@@ -276,12 +280,12 @@ pub fn list_archives(
                      FROM archives a
                      WHERE (:favorites = 0 OR a.is_favorite = 1)
                        {tag_filter}
-                       AND a.original_filename LIKE ?1 ESCAPE '\\'
+                       AND a.original_filename LIKE :search ESCAPE '\\'
                      ORDER BY {order_by}
-                     LIMIT :limit"
+                     "
                 )
             };
-            (sql, vec![escaped])
+            (sql, Some(escaped))
         }
     } else {
         let sql = if query.recent_only {
@@ -304,23 +308,22 @@ pub fn list_archives(
                  WHERE (:favorites = 0 OR a.is_favorite = 1)
                    {tag_filter}
                  ORDER BY {order_by}
-                 LIMIT :limit"
+                 "
             )
         };
-        (sql, vec![])
+        (sql, None)
     };
 
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| format!("アーカイブ一覧の問い合わせを準備できませんでした: {error}"))?;
 
-    let limit = if query.recent_only { -1 } else { RECENT_LIMIT as i64 };
-    let mut archives = if params_vec.is_empty() {
+    let mut archives = if let Some(search_param) = search_param {
         statement
             .query_map(
                 named_params! {
                     ":favorites": query.favorites_only as i64,
-                    ":limit": limit,
+                    ":search": search_param,
                 },
                 |row| {
                     Ok(ArchiveSummary {
@@ -342,14 +345,11 @@ pub fn list_archives(
             )
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
     } else {
-        let search_param = params_vec[0].clone();
         statement
             .query_map(
-                rusqlite::params![
-                    search_param,
-                    query.favorites_only as i64,
-                    limit,
-                ],
+                named_params! {
+                    ":favorites": query.favorites_only as i64,
+                },
                 |row| {
                     Ok(ArchiveSummary {
                         archive_id: row.get(0)?,
@@ -859,7 +859,7 @@ mod tests {
     use super::{
         add_tag, add_tag_to_archives, create_tag_group, delete_tag_group, list_archives,
         list_tag_groups, list_tags, move_tag, move_tag_group, remove_tag, remove_tag_from_archives,
-        rename_tag_group, set_favorite, ArchiveQuery, SortBy, SortDirection,
+        rename_tag_group, set_favorite, ArchiveQuery, SortBy, SortDirection, RECENT_LIMIT,
     };
     use crate::database;
     use rusqlite::{params, Connection};
@@ -891,7 +891,7 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let id = format!("{index:x}").repeat(64);
+            let id = format!("{index:064x}");
             connection
                 .execute(
                     "INSERT INTO archives (archive_id, original_filename, relative_path, format,
@@ -951,7 +951,7 @@ mod tests {
     }
 
     fn id(index: usize) -> String {
-        format!("{index:x}").repeat(64)
+        format!("{index:064x}")
     }
 
     fn names(root: &Path, query: &ArchiveQuery) -> Vec<String> {
@@ -1060,6 +1060,64 @@ mod tests {
         set_favorite(repository.path(), &id(1), false).expect("unfavorite");
         assert!(names(repository.path(), &favorites).is_empty());
         assert!(set_favorite(repository.path(), &"f".repeat(64), true).is_err());
+    }
+
+    #[test]
+    fn archive_queries_return_more_than_fifty_results_except_recent() {
+        let repository = repository_with_archives();
+        let connection = Connection::open(repository.path().join("database/library.sqlite3"))
+            .expect("open database");
+        for index in 3..54 {
+            let archive_id = id(index);
+            let filename = format!("bulk-{index}.cbz");
+            connection
+                .execute(
+                    "INSERT INTO archives (archive_id, original_filename, relative_path, format,
+                        file_size, is_favorite, imported_at)
+                     VALUES (?1, ?2, ?3, 'cbz', 1, 1, '2026-04-01T00:00:00Z')",
+                    params![
+                        archive_id,
+                        filename,
+                        format!("archives/{}/{filename}", &archive_id[..2])
+                    ],
+                )
+                .expect("insert archive");
+        }
+
+        assert_eq!(names(repository.path(), &ArchiveQuery::default()).len(), 54);
+        assert_eq!(
+            names(
+                repository.path(),
+                &ArchiveQuery {
+                    search: Some("bulk-".to_string()),
+                    ..Default::default()
+                }
+            )
+            .len(),
+            51
+        );
+        assert_eq!(
+            names(
+                repository.path(),
+                &ArchiveQuery {
+                    favorites_only: true,
+                    ..Default::default()
+                }
+            )
+            .len(),
+            51
+        );
+        assert_eq!(
+            names(
+                repository.path(),
+                &ArchiveQuery {
+                    recent_only: true,
+                    ..Default::default()
+                }
+            )
+            .len(),
+            RECENT_LIMIT as usize
+        );
     }
 
     #[test]
