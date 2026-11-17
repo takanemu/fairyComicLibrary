@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Archive library manager"
 authors = ["you"]
 edition = "2021"
+rust-version = "1.100"
 
 [lib]
 name = "fairy_comic_library_lib"

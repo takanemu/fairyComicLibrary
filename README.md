@@ -19,7 +19,7 @@
 
 - Ubuntu x86_64
 - Node.js 24 以降
-- Rust stable 1.85 以降
+- Rust stable 1.100.0
 - AppImage の実行には FUSE 2 互換ライブラリが必要です。Ubuntu 24.04 / 26.04 では `libfuse2t64` を使用してください（26.04 の標準 FUSE 3 だけでは足りません）。
 
 開発環境のセットアップに必要な Linux システムパッケージは、[Tauri の Linux 前提条件](https://v2.tauri.app/start/prerequisites/#linux)を参照してください。
