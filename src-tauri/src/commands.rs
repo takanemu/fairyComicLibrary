@@ -1,4 +1,4 @@
-use crate::{library, repository, AppState};
+use crate::{library, repository, services::LibraryService, AppState};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
 
@@ -19,7 +19,9 @@ pub fn get_repository_status(
         "リポジトリ状態を読み取れませんでした。アプリを再起動してください。".to_string()
     })?;
     match path.as_ref() {
-        Some(path) => repository::open(path).map(Some),
+        Some(path) => LibraryService::new(path.clone())
+            .repository_status()
+            .map(Some),
         None => Ok(None),
     }
 }
@@ -30,7 +32,7 @@ pub fn open_repository(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<repository::RepositoryStatus, String> {
-    let status = repository::open(&PathBuf::from(path))?;
+    let (_, status) = LibraryService::open(&PathBuf::from(path))?;
     repository::save_selected_repository(&app, PathBuf::from(&status.path).as_path())?;
     *state.repository_path.lock().map_err(|_| {
         "リポジトリ状態を更新できませんでした。アプリを再起動してください。".to_string()
@@ -55,30 +57,26 @@ pub async fn import_archive(
 
     let _import_guard = state.import_lock.lock().await;
     let thumbnail_path = thumbnail_path.map(PathBuf::from);
-    crate::importing::import_archive_with_thumbnail(
-        &repository_path,
-        &PathBuf::from(path),
-        thumbnail_path.as_deref(),
-    )
-    .await
+    LibraryService::new(repository_path)
+        .import_archive(&PathBuf::from(path), thumbnail_path.as_deref())
+        .await
 }
 
-fn current_repository(state: &State<'_, AppState>) -> Result<PathBuf, String> {
-    state
+fn current_service(state: &State<'_, AppState>) -> Result<LibraryService, String> {
+    let root = state
         .repository_path
         .lock()
         .map_err(|_| {
             "リポジトリ状態を読み取れませんでした。アプリを再起動してください。".to_string()
         })?
         .clone()
-        .ok_or_else(|| "先にアプリ管理リポジトリを選択してください。".to_string())
+        .ok_or_else(|| "先にアプリ管理リポジトリを選択してください。".to_string())?;
+    Ok(LibraryService::new(root))
 }
 
 #[tauri::command(async)]
 pub fn get_video_duration(archive_id: String, state: State<'_, AppState>) -> Result<u64, String> {
-    let root = current_repository(&state)?;
-    let (path, format) = crate::maintenance::archive_for_open(&root, &archive_id)?;
-    crate::video::duration_seconds(&path, &format)
+    current_service(&state)?.get_video_duration(&archive_id)
 }
 
 #[tauri::command(async)]
@@ -86,17 +84,17 @@ pub fn list_archives(
     query: library::ArchiveQuery,
     state: State<'_, AppState>,
 ) -> Result<Vec<library::ArchiveSummary>, String> {
-    library::list_archives(&current_repository(&state)?, &query)
+    current_service(&state)?.list_archives(&query)
 }
 
 #[tauri::command(async)]
 pub fn list_tags(state: State<'_, AppState>) -> Result<Vec<library::TagWithCount>, String> {
-    library::list_tags(&current_repository(&state)?)
+    current_service(&state)?.list_tags()
 }
 
 #[tauri::command(async)]
 pub fn list_tag_groups(state: State<'_, AppState>) -> Result<Vec<library::TagGroup>, String> {
-    library::list_tag_groups(&current_repository(&state)?)
+    current_service(&state)?.list_tag_groups()
 }
 
 #[tauri::command(async)]
@@ -106,7 +104,7 @@ pub fn create_tag_group(
     parent_id: Option<i64>,
     state: State<'_, AppState>,
 ) -> Result<library::TagGroup, String> {
-    library::create_tag_group(&current_repository(&state)?, &category, &name, parent_id)
+    current_service(&state)?.create_tag_group(&category, &name, parent_id)
 }
 
 #[tauri::command(async)]
@@ -115,12 +113,12 @@ pub fn rename_tag_group(
     name: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    library::rename_tag_group(&current_repository(&state)?, group_id, &name)
+    current_service(&state)?.rename_tag_group(group_id, &name)
 }
 
 #[tauri::command(async)]
 pub fn delete_tag_group(group_id: i64, state: State<'_, AppState>) -> Result<(), String> {
-    library::delete_tag_group(&current_repository(&state)?, group_id)
+    current_service(&state)?.delete_tag_group(group_id)
 }
 
 #[tauri::command(async)]
@@ -129,7 +127,7 @@ pub fn move_tag(
     parent_id: Option<i64>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    library::move_tag(&current_repository(&state)?, tag_id, parent_id)
+    current_service(&state)?.move_tag(tag_id, parent_id)
 }
 
 #[tauri::command(async)]
@@ -138,7 +136,7 @@ pub fn move_tag_group(
     parent_id: Option<i64>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    library::move_tag_group(&current_repository(&state)?, group_id, parent_id)
+    current_service(&state)?.move_tag_group(group_id, parent_id)
 }
 
 #[tauri::command(async)]
@@ -147,7 +145,7 @@ pub fn set_favorite(
     is_favorite: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    library::set_favorite(&current_repository(&state)?, &archive_id, is_favorite)
+    current_service(&state)?.set_favorite(&archive_id, is_favorite)
 }
 
 #[tauri::command(async)]
@@ -157,7 +155,7 @@ pub fn add_tag(
     name: String,
     state: State<'_, AppState>,
 ) -> Result<library::TagSummary, String> {
-    library::add_tag(&current_repository(&state)?, &archive_id, &category, &name)
+    current_service(&state)?.add_tag(&archive_id, &category, &name)
 }
 
 #[tauri::command(async)]
@@ -167,7 +165,7 @@ pub fn add_tag_to_archives(
     name: String,
     state: State<'_, AppState>,
 ) -> Result<library::TagSummary, String> {
-    library::add_tag_to_archives(&current_repository(&state)?, &archive_ids, &category, &name)
+    current_service(&state)?.add_tag_to_archives(&archive_ids, &category, &name)
 }
 
 #[tauri::command(async)]
@@ -176,7 +174,7 @@ pub fn remove_tag(
     tag_id: i64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    library::remove_tag(&current_repository(&state)?, &archive_id, tag_id)
+    current_service(&state)?.remove_tag(&archive_id, tag_id)
 }
 
 #[tauri::command(async)]
@@ -185,7 +183,7 @@ pub fn remove_tag_from_archives(
     tag_id: i64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    library::remove_tag_from_archives(&current_repository(&state)?, &archive_ids, tag_id)
+    current_service(&state)?.remove_tag_from_archives(&archive_ids, tag_id)
 }
 
 #[tauri::command]
@@ -193,14 +191,12 @@ pub async fn backup_repository(
     destination: String,
     state: State<'_, AppState>,
 ) -> Result<crate::maintenance::BackupSummary, String> {
-    let repository_path = current_repository(&state)?;
+    let service = current_service(&state)?;
     // インポートと同時に走らせると、ファイルとDBの対応が崩れた状態でコピーしかねない。
     let _import_guard = state.import_lock.lock().await;
-    tokio::task::spawn_blocking(move || {
-        crate::maintenance::backup(&repository_path, &PathBuf::from(destination))
-    })
-    .await
-    .map_err(|error| format!("バックアップ処理に失敗しました: {error}"))?
+    tokio::task::spawn_blocking(move || service.backup_repository(&PathBuf::from(destination)))
+        .await
+        .map_err(|error| format!("バックアップ処理に失敗しました: {error}"))?
 }
 
 #[tauri::command]
@@ -213,20 +209,20 @@ pub async fn unmanage_archives(
         .path()
         .download_dir()
         .map_err(|error| format!("ダウンロードフォルダを取得できませんでした: {error}"))?;
-    with_exclusive_repository(&state, move |root| {
-        crate::maintenance::unmanage_archives(&root, &download_directory, &archive_ids)
+    with_exclusive_repository(&state, move |service| {
+        service.unmanage_archives(&archive_ids, &download_directory)
     })
     .await
 }
 
 async fn with_exclusive_repository<T: Send + 'static>(
     state: &State<'_, AppState>,
-    work: impl FnOnce(PathBuf) -> Result<T, String> + Send + 'static,
+    work: impl FnOnce(LibraryService) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
-    let repository_path = current_repository(state)?;
+    let service = current_service(state)?;
     // インポート・バックアップと同時にサムネイルを差し替えないよう直列化する。
     let _guard = state.import_lock.lock().await;
-    tokio::task::spawn_blocking(move || work(repository_path))
+    tokio::task::spawn_blocking(move || work(service))
         .await
         .map_err(|error| format!("処理に失敗しました: {error}"))?
 }
@@ -237,8 +233,8 @@ pub async fn regenerate_thumbnail(
     entry_name: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    with_exclusive_repository(&state, move |root| {
-        crate::maintenance::regenerate_thumbnail(&root, &archive_id, entry_name.as_deref())
+    with_exclusive_repository(&state, move |service| {
+        service.regenerate_thumbnail(&archive_id, entry_name.as_deref())
     })
     .await
 }
@@ -250,8 +246,8 @@ pub async fn set_package_image(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let image_path = PathBuf::from(image_path);
-    with_exclusive_repository(&state, move |root| {
-        crate::maintenance::set_package_image(&root, &archive_id, &image_path)
+    with_exclusive_repository(&state, move |service| {
+        service.set_package_image(&archive_id, &image_path)
     })
     .await
 }
@@ -260,57 +256,13 @@ pub async fn set_package_image(
 pub async fn regenerate_missing_thumbnails(
     state: State<'_, AppState>,
 ) -> Result<crate::maintenance::RegenerateSummary, String> {
-    with_exclusive_repository(&state, |root| {
-        crate::maintenance::regenerate_missing_thumbnails(&root)
-    })
-    .await
+    with_exclusive_repository(&state, |service| service.regenerate_missing_thumbnails()).await
 }
 
 // ビューアーは同梱バイナリ（externalBin）として本体の実行ファイルと同じ場所に置かれる。
 #[tauri::command]
 pub fn open_in_viewer(archive_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let root = current_repository(&state)?;
-    let (archive, format) = crate::maintenance::archive_for_open(&root, &archive_id)?;
-    if matches!(format.as_str(), "epub" | "azw3" | "mkv" | "mp4") {
-        let application = if matches!(format.as_str(), "mkv" | "mp4") {
-            "動画プレーヤー"
-        } else {
-            "電子書籍リーダー"
-        };
-        let output = std::process::Command::new("xdg-open")
-            .arg(&archive)
-            .output()
-            .map_err(|error| {
-                format!("OSに関連付けられた{application}を起動できませんでした: {error}")
-            })?;
-        if !output.status.success() {
-            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(if detail.is_empty() {
-                format!("OSに関連付けられた{application}を起動できませんでした。対応するアプリを関連付けてください。")
-            } else {
-                format!("OSに関連付けられた{application}を起動できませんでした: {detail}")
-            });
-        }
-    } else {
-        let viewer = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|dir| dir.join("brave-comic-viewer")))
-            .filter(|path| path.is_file())
-            .ok_or_else(|| "ビューアー（brave-comic-viewer）が見つかりません。".to_string())?;
-        let mut child = std::process::Command::new(viewer)
-            .arg(&archive)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|error| format!("ビューアーを起動できませんでした: {error}"))?;
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-    }
-    crate::library::record_read(&root, &archive_id).map_err(|error| {
-        format!("ビューアーは起動しましたが読書履歴を更新できませんでした: {error}")
-    })
+    current_service(&state)?.open_in_viewer(&archive_id)
 }
 
 #[tauri::command]
@@ -318,8 +270,8 @@ pub async fn list_cover_candidates(
     archive_id: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
-    with_exclusive_repository(&state, move |root| {
-        crate::maintenance::list_cover_candidates(&root, &archive_id)
+    with_exclusive_repository(&state, move |service| {
+        service.list_cover_candidates(&archive_id)
     })
     .await
 }
@@ -333,14 +285,12 @@ pub async fn convert_archive(
     state: State<'_, AppState>,
 ) -> Result<crate::conversion::ConvertOutcome, String> {
     let cancel = state.convert_cancel.clone();
-    cancel.store(false, std::sync::atomic::Ordering::SeqCst);
-    with_exclusive_repository(&state, move |root| {
+    with_exclusive_repository(&state, move |service| {
         let mut encode =
             |input: &std::path::Path, output: &std::path::Path, speed: u8| -> Result<(), String> {
                 crate::conversion::run_avifenc(&app, input, output, speed)
             };
-        crate::conversion::convert_archive(
-            &root,
+        service.convert_archive(
             &archive_id,
             avif_speed,
             &cancel,

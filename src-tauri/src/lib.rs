@@ -5,6 +5,7 @@ mod importing;
 mod library;
 mod maintenance;
 mod repository;
+mod services;
 mod thumbnails;
 mod video;
 
