@@ -93,14 +93,25 @@ fn handle_request(service: &LibraryService, request: Value) -> Option<Value> {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             Ok(match call_tool(service, name, arguments) {
-                Ok(result) => json!({
-                    "content": [{
-                        "type": "text",
-                        "text": serde_json::to_string(&result)
-                            .unwrap_or_else(|_| "null".to_string())
-                    }],
-                    "isError": false
-                }),
+                Ok(result) => {
+                    if is_mutating_tool(name) {
+                        if let Ok(revision) = service.latest_change_revision() {
+                            if let Err(error) =
+                                crate::sync::notify(service.repository_root(), revision)
+                            {
+                                eprintln!("MCP変更通知を送れませんでした: {error}");
+                            }
+                        }
+                    }
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": serde_json::to_string(&result)
+                                .unwrap_or_else(|_| "null".to_string())
+                        }],
+                        "isError": false
+                    })
+                }
                 Err(error) => json!({
                     "content": [{ "type": "text", "text": error }],
                     "isError": true
@@ -114,6 +125,20 @@ fn handle_request(service: &LibraryService, request: Value) -> Option<Value> {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
         Err((code, message)) => error_response(id, code, &message),
     })
+}
+
+fn is_mutating_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "set_favorite"
+            | "add_tag_to_archives"
+            | "remove_tag_from_archives"
+            | "create_tag_group"
+            | "rename_tag_group"
+            | "delete_tag_group"
+            | "move_tag"
+            | "move_tag_group"
+    )
 }
 
 fn error_response(id: Value, code: i64, message: &str) -> Value {

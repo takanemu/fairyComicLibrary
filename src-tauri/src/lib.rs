@@ -7,12 +7,16 @@ mod maintenance;
 mod mcp;
 mod repository;
 mod services;
+mod sync;
 mod thumbnails;
 mod video;
 
 use std::{
     borrow::Cow,
-    sync::{atomic::AtomicBool, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicU64},
+        Arc, Mutex,
+    },
 };
 use tauri::{http, Manager};
 use tokio::sync::Mutex as AsyncMutex;
@@ -21,6 +25,8 @@ pub struct AppState {
     repository_path: Mutex<Option<std::path::PathBuf>>,
     import_lock: AsyncMutex<()>,
     convert_cancel: Arc<AtomicBool>,
+    sync_generation: Arc<AtomicU64>,
+    sync_repository: Mutex<Option<std::path::PathBuf>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -33,6 +39,8 @@ pub fn run() {
             repository_path: Mutex::new(None),
             import_lock: AsyncMutex::new(()),
             convert_cancel: Arc::new(AtomicBool::new(false)),
+            sync_generation: Arc::new(AtomicU64::new(0)),
+            sync_repository: Mutex::new(None),
         })
         .register_asynchronous_uri_scheme_protocol("thumbnail", |context, request, responder| {
             let state = context.app_handle().state::<AppState>();
@@ -73,6 +81,7 @@ pub fn run() {
             commands::get_video_duration,
             commands::convert_archive,
             commands::cancel_conversion,
+            commands::get_change_revision,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Fairy Comic Library");

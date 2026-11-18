@@ -38,6 +38,14 @@ impl LibraryService {
         repository::open(&self.repository_root)
     }
 
+    pub fn repository_root(&self) -> &Path {
+        &self.repository_root
+    }
+
+    pub fn latest_change_revision(&self) -> Result<i64, String> {
+        crate::sync::latest_change_revision(&self.repository_root)
+    }
+
     pub fn get_video_duration(&self, archive_id: &str) -> Result<u64, String> {
         let (path, format) = maintenance::archive_for_open(&self.repository_root, archive_id)?;
         video::duration_seconds(&path, &format)

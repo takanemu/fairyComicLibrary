@@ -8,6 +8,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import importButtonIcon from "./assets/book-import.png";
 import { ConvertResult } from "./components/library/ConvertDialog";
 import { LibraryView } from "./components/library/LibraryView";
@@ -387,6 +388,52 @@ function App() {
   }, []);
 
   const bumpVersion = useCallback(() => setVersion((current) => current + 1), []);
+  const changeRevisionRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!repository || !("__TAURI_INTERNALS__" in window)) {
+      changeRevisionRef.current = null;
+      return;
+    }
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    const refreshRevision = async () => {
+      try {
+        const revision = await invoke<number>("get_change_revision");
+        if (!active) return;
+        const previous = changeRevisionRef.current;
+        changeRevisionRef.current = revision;
+        if (previous !== null && revision !== previous) {
+          bumpVersion();
+        }
+      } catch (reason) {
+        if (active) {
+          setError(`変更履歴を確認できませんでした: ${String(reason)}`);
+        }
+      }
+    };
+    void refreshRevision();
+    void listen("library-changed", () => {
+      if (active) {
+        void refreshRevision();
+      }
+    })
+      .then((stop) => {
+        if (active) unlisten = stop;
+        else stop();
+      })
+      .catch((reason) => {
+        if (active) {
+          setError(`MCP変更通知を受信できませんでした: ${String(reason)}`);
+        }
+      });
+    const timer = window.setInterval(() => void refreshRevision(), 1500);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      unlisten?.();
+    };
+  }, [repository?.path, bumpVersion]);
 
   async function createGroup(category: TagCategory, name: string, parentId: number | null) {
     setError(null);

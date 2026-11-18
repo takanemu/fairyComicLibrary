@@ -13,18 +13,23 @@ pub fn get_repository_status(
         *state.repository_path.lock().map_err(|_| {
             "リポジトリ状態を更新できませんでした。アプリを再起動してください。".to_string()
         })? = Some(PathBuf::from(&status.path));
+        start_change_listener(&app, &state, &status.path)?;
         return Ok(Some(status));
     }
 
     let path = state.repository_path.lock().map_err(|_| {
         "リポジトリ状態を読み取れませんでした。アプリを再起動してください。".to_string()
     })?;
-    match path.as_ref() {
+    let status = match path.as_ref() {
         Some(path) => LibraryService::new(path.clone())
             .repository_status()
             .map(Some),
         None => Ok(None),
+    }?;
+    if let Some(status) = &status {
+        start_change_listener(&app, &state, &status.path)?;
     }
+    Ok(status)
 }
 
 #[tauri::command]
@@ -38,7 +43,31 @@ pub fn open_repository(
     *state.repository_path.lock().map_err(|_| {
         "リポジトリ状態を更新できませんでした。アプリを再起動してください。".to_string()
     })? = Some(PathBuf::from(&status.path));
+    start_change_listener(&app, &state, &status.path)?;
     Ok(status)
+}
+
+fn start_change_listener(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    repository_path: &str,
+) -> Result<(), String> {
+    let path = PathBuf::from(repository_path);
+    let mut active = state
+        .sync_repository
+        .lock()
+        .map_err(|_| "MCP変更通知の状態を読み取れませんでした。".to_string())?;
+    if active.as_ref() == Some(&path) {
+        return Ok(());
+    }
+    crate::sync::start_listener(app.clone(), path.clone(), state.sync_generation.clone())?;
+    *active = Some(path);
+    Ok(())
+}
+
+#[tauri::command(async)]
+pub fn get_change_revision(state: State<'_, AppState>) -> Result<i64, String> {
+    current_service(&state)?.latest_change_revision()
 }
 
 #[tauri::command]
