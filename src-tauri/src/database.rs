@@ -1,10 +1,48 @@
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::path::Path;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 9;
+pub const CURRENT_SCHEMA_VERSION: u32 = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeSource {
+    Gui,
+    Mcp,
+    System,
+}
+
+impl ChangeSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Gui => "gui",
+            Self::Mcp => "mcp",
+            Self::System => "system",
+        }
+    }
+}
+
+pub fn record_change(
+    transaction: &Transaction<'_>,
+    entity_type: &str,
+    entity_id: &str,
+    operation: &str,
+    source: ChangeSource,
+    summary: &str,
+) -> Result<i64, String> {
+    transaction
+        .execute(
+            "INSERT INTO library_changes (
+                entity_type, entity_id, operation, source, summary, changed_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             )",
+            params![entity_type, entity_id, operation, source.as_str(), summary],
+        )
+        .map_err(|error| format!("変更履歴を記録できませんでした: {error}"))?;
+    Ok(transaction.last_insert_rowid())
+}
 
 pub fn initialize(path: &Path) -> Result<u64, String> {
-    let connection = Connection::open(path)
+    let mut connection = Connection::open(path)
         .map_err(|error| format!("SQLiteデータベースを開けませんでした: {error}"))?;
     connection
         .pragma_update(None, "foreign_keys", "ON")
@@ -271,46 +309,96 @@ pub fn initialize(path: &Path) -> Result<u64, String> {
     if current < 9 {
         let db_dir = path.parent();
         let repository_root = db_dir.and_then(|dir| dir.parent());
-        
+
         // リポジトリ構造が整っている場合のみ移行を実行
         if let Some(repo) = repository_root {
             if repo.join("thumbnails").exists() && repo.join("archives").exists() {
                 drop(connection);
-                
+
                 crate::thumbnails::migrate_avif_thumbnails(repo)
                     .map_err(|error| format!("AVIF→WebP移行に失敗しました: {error}"))?;
-                
-                let connection = Connection::open(path)
-                    .map_err(|error| format!("SQLiteデータベースを再度開けませんでした: {error}"))?;
+
+                connection = Connection::open(path).map_err(|error| {
+                    format!("SQLiteデータベースを再度開けませんでした: {error}")
+                })?;
                 connection
                     .pragma_update(None, "foreign_keys", "ON")
-                    .map_err(|error| format!("SQLite外部キー制約を有効にできませんでした: {error}"))?;
-                
-                let transaction = connection
-                    .unchecked_transaction()
-                    .map_err(|error| format!("SQLiteスキーマの更新を開始できませんでした: {error}"))?;
+                    .map_err(|error| {
+                        format!("SQLite外部キー制約を有効にできませんでした: {error}")
+                    })?;
+
+                let transaction = connection.unchecked_transaction().map_err(|error| {
+                    format!("SQLiteスキーマの更新を開始できませんでした: {error}")
+                })?;
                 transaction
                     .execute_batch("PRAGMA user_version = 9;")
-                    .map_err(|error| format!("SQLiteスキーマをv9へ更新できませんでした: {error}"))?;
+                    .map_err(|error| {
+                        format!("SQLiteスキーマをv9へ更新できませんでした: {error}")
+                    })?;
+                transaction.commit().map_err(|error| {
+                    format!("SQLiteスキーマの更新を確定できませんでした: {error}")
+                })?;
+            } else {
+                let transaction = connection.unchecked_transaction().map_err(|error| {
+                    format!("SQLiteスキーマの更新を開始できませんでした: {error}")
+                })?;
                 transaction
-                    .commit()
-                    .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
-                
-                return connection
-                    .query_row("SELECT COUNT(*) FROM archives", [], |row| {
-                        row.get::<_, u64>(0)
-                    })
-                    .map_err(|error| format!("SQLiteデータベースを読み取れませんでした: {error}"));
+                    .execute_batch("PRAGMA user_version = 9;")
+                    .map_err(|error| {
+                        format!("SQLiteスキーマをv9へ更新できませんでした: {error}")
+                    })?;
+                transaction.commit().map_err(|error| {
+                    format!("SQLiteスキーマの更新を確定できませんでした: {error}")
+                })?;
             }
+        } else {
+            // テストやリポジトリ構造がない場合：バージョンだけ上げて移行をスキップ
+            let transaction = connection
+                .unchecked_transaction()
+                .map_err(|error| format!("SQLiteスキーマの更新を開始できませんでした: {error}"))?;
+            transaction
+                .execute_batch("PRAGMA user_version = 9;")
+                .map_err(|error| format!("SQLiteスキーマをv9へ更新できませんでした: {error}"))?;
+            transaction
+                .commit()
+                .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
         }
-        
-        // テストやリポジトリ構造がない場合：バージョンだけ上げて移行をスキップ
+    }
+
+    let current = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+        .map_err(|error| format!("SQLiteスキーマバージョンを読み取れませんでした: {error}"))?;
+    if current < 10 {
         let transaction = connection
             .unchecked_transaction()
             .map_err(|error| format!("SQLiteスキーマの更新を開始できませんでした: {error}"))?;
         transaction
-            .execute_batch("PRAGMA user_version = 9;")
-            .map_err(|error| format!("SQLiteスキーマをv9へ更新できませんでした: {error}"))?;
+            .execute_batch(
+                "
+                ALTER TABLE archives ADD COLUMN revision INTEGER NOT NULL DEFAULT 0
+                    CHECK(revision >= 0);
+                ALTER TABLE tags ADD COLUMN revision INTEGER NOT NULL DEFAULT 0
+                    CHECK(revision >= 0);
+                ALTER TABLE tag_groups ADD COLUMN revision INTEGER NOT NULL DEFAULT 0
+                    CHECK(revision >= 0);
+
+                CREATE TABLE library_changes (
+                    revision INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entity_type TEXT NOT NULL CHECK(entity_type IN ('archive', 'tag', 'tag_group')),
+                    entity_id TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    source TEXT NOT NULL CHECK(source IN ('gui', 'mcp', 'system')),
+                    summary TEXT NOT NULL,
+                    changed_at TEXT NOT NULL
+                );
+                CREATE INDEX idx_library_changes_entity
+                    ON library_changes(entity_type, entity_id, revision DESC);
+                CREATE INDEX idx_library_changes_revision
+                    ON library_changes(revision DESC);
+                PRAGMA user_version = 10;
+                ",
+            )
+            .map_err(|error| format!("SQLiteスキーマをv10へ更新できませんでした: {error}"))?;
         transaction
             .commit()
             .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
@@ -325,7 +413,7 @@ pub fn initialize(path: &Path) -> Result<u64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{initialize, CURRENT_SCHEMA_VERSION};
+    use super::{initialize, record_change, ChangeSource, CURRENT_SCHEMA_VERSION};
     use rusqlite::Connection;
 
     #[test]
@@ -372,6 +460,122 @@ mod tests {
             )
             .expect("read persisted archive path");
         assert_eq!(relative_path, "archives/aa/sample.cbz");
+        let revision: i64 = connection
+            .query_row(
+                "SELECT revision FROM archives WHERE archive_id = ?1",
+                ["a".repeat(64)],
+                |row| row.get(0),
+            )
+            .expect("read archive revision");
+        assert_eq!(revision, 0);
+    }
+
+    #[test]
+    fn migrates_v9_revisions_and_change_history() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        let database_path = repository.path().join("library.sqlite3");
+        let connection = Connection::open(&database_path).expect("create v9 database");
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE archives (
+                    archive_id TEXT PRIMARY KEY,
+                    original_filename TEXT NOT NULL,
+                    relative_path TEXT NOT NULL UNIQUE,
+                    format TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    imported_at TEXT NOT NULL,
+                    thumbnail_relative_path TEXT,
+                    is_favorite INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE tags (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    group_id INTEGER
+                );
+                CREATE TABLE archive_tags (
+                    archive_id TEXT NOT NULL,
+                    tag_id INTEGER NOT NULL
+                );
+                CREATE TABLE tag_groups (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    parent_id INTEGER
+                );
+                INSERT INTO archives (
+                    archive_id, original_filename, relative_path, format, file_size, imported_at
+                ) VALUES (
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'legacy.cbz', 'archives/aa/legacy.cbz', 'cbz', 42, '2026-10-24T00:00:00Z'
+                );
+                INSERT INTO tags (id, name, category) VALUES (1, 'Author', 'author');
+                INSERT INTO tag_groups (id, name, category) VALUES (1, 'Group', 'author');
+                PRAGMA user_version = 9;
+                ",
+            )
+            .expect("create v9 schema");
+        drop(connection);
+
+        assert_eq!(initialize(&database_path).expect("migrate v9 database"), 1);
+
+        let connection = Connection::open(database_path).expect("open migrated database");
+        let (archive_revision, tag_revision, group_revision): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT
+                    (SELECT revision FROM archives),
+                    (SELECT revision FROM tags),
+                    (SELECT revision FROM tag_groups)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read migrated revisions");
+        assert_eq!((archive_revision, tag_revision, group_revision), (0, 0, 0));
+        let version = connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .expect("read migrated version");
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn records_change_in_the_callers_transaction() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        let database_path = repository.path().join("database/library.sqlite3");
+        std::fs::create_dir_all(database_path.parent().expect("database parent"))
+            .expect("create database directory");
+        initialize(&database_path).expect("initialize database");
+
+        let mut connection = Connection::open(&database_path).expect("open database");
+        let transaction = connection.transaction().expect("start transaction");
+        let change_revision = record_change(
+            &transaction,
+            "archive",
+            &"a".repeat(64),
+            "favorite_changed",
+            ChangeSource::Mcp,
+            "お気に入りを変更",
+        )
+        .expect("record change");
+        transaction.commit().expect("commit change");
+
+        let stored: (i64, String, String, String) = connection
+            .query_row(
+                "SELECT revision, entity_id, source, operation FROM library_changes",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("read change");
+        assert_eq!(
+            stored,
+            (
+                change_revision,
+                "a".repeat(64),
+                "mcp".to_string(),
+                "favorite_changed".to_string()
+            )
+        );
+        assert!(change_revision > 0);
     }
 
     #[test]
@@ -445,7 +649,11 @@ mod tests {
                     relative_path TEXT NOT NULL,
                     format TEXT NOT NULL,
                     file_size INTEGER NOT NULL,
-                    imported_at TEXT NOT NULL
+                    imported_at TEXT NOT NULL,
+                    converted_from TEXT,
+                    page_count INTEGER,
+                    last_read_at TEXT,
+                    read_count INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE tags (
                     id INTEGER PRIMARY KEY,
@@ -458,7 +666,9 @@ mod tests {
                     tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
                     PRIMARY KEY (archive_id, tag_id)
                 );
-                INSERT INTO archives VALUES (
+                INSERT INTO archives (
+                    archive_id, original_filename, relative_path, format, file_size, imported_at
+                ) VALUES (
                     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
                     'legacy.cbz', 'archives/aa/legacy.cbz', 'cbz', 42, '2026-10-24T00:00:00Z'
                 );
