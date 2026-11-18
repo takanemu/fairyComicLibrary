@@ -11,11 +11,22 @@ use std::{
 #[derive(Debug, Clone)]
 pub struct LibraryService {
     repository_root: PathBuf,
+    change_source: crate::database::ChangeSource,
 }
 
 impl LibraryService {
     pub fn new(repository_root: PathBuf) -> Self {
-        Self { repository_root }
+        Self {
+            repository_root,
+            change_source: crate::database::ChangeSource::Gui,
+        }
+    }
+
+    pub fn for_mcp(repository_root: PathBuf) -> Self {
+        Self {
+            repository_root,
+            change_source: crate::database::ChangeSource::Mcp,
+        }
     }
 
     pub fn open(repository_path: &Path) -> Result<(Self, repository::RepositoryStatus), String> {
@@ -53,7 +64,13 @@ impl LibraryService {
         name: &str,
         parent_id: Option<i64>,
     ) -> Result<library::TagGroup, String> {
-        library::create_tag_group(&self.repository_root, category, name, parent_id)
+        library::create_tag_group_with_source(
+            &self.repository_root,
+            category,
+            name,
+            parent_id,
+            self.change_source,
+        )
     }
 
     pub fn rename_tag_group(
@@ -67,11 +84,17 @@ impl LibraryService {
             group_id,
             name,
             expected_revision,
+            self.change_source,
         )
     }
 
     pub fn delete_tag_group(&self, group_id: i64, expected_revision: i64) -> Result<(), String> {
-        library::delete_tag_group_with_revision(&self.repository_root, group_id, expected_revision)
+        library::delete_tag_group_with_revision(
+            &self.repository_root,
+            group_id,
+            expected_revision,
+            self.change_source,
+        )
     }
 
     pub fn move_tag(
@@ -80,7 +103,13 @@ impl LibraryService {
         parent_id: Option<i64>,
         expected_revision: i64,
     ) -> Result<(), String> {
-        library::move_tag_with_revision(&self.repository_root, tag_id, parent_id, expected_revision)
+        library::move_tag_with_revision(
+            &self.repository_root,
+            tag_id,
+            parent_id,
+            expected_revision,
+            self.change_source,
+        )
     }
 
     pub fn move_tag_group(
@@ -94,6 +123,7 @@ impl LibraryService {
             group_id,
             parent_id,
             expected_revision,
+            self.change_source,
         )
     }
 
@@ -108,6 +138,7 @@ impl LibraryService {
             archive_id,
             is_favorite,
             expected_revision,
+            self.change_source,
         )
     }
 
@@ -139,6 +170,7 @@ impl LibraryService {
             category,
             name,
             expected_revisions,
+            self.change_source,
         )
     }
 
@@ -170,6 +202,7 @@ impl LibraryService {
             tag_id,
             expected_revisions,
             expected_tag_revision,
+            self.change_source,
         )
     }
 

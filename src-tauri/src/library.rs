@@ -593,6 +593,22 @@ pub fn create_tag_group(
     name: &str,
     parent_id: Option<i64>,
 ) -> Result<TagGroup, String> {
+    create_tag_group_with_source(
+        repository_root,
+        category,
+        name,
+        parent_id,
+        crate::database::ChangeSource::Gui,
+    )
+}
+
+pub fn create_tag_group_with_source(
+    repository_root: &Path,
+    category: &str,
+    name: &str,
+    parent_id: Option<i64>,
+    source: crate::database::ChangeSource,
+) -> Result<TagGroup, String> {
     if !TAG_CATEGORIES.contains(&category) {
         return Err("タグの分類が不正です。".to_string());
     }
@@ -614,7 +630,7 @@ pub fn create_tag_group(
         "tag_group",
         &id.to_string(),
         "created",
-        crate::database::ChangeSource::Gui,
+        source,
         &format!("タググループ「{name}」を作成"),
     )?;
     transaction
@@ -929,6 +945,7 @@ pub fn set_favorite_with_revision(
     archive_id: &str,
     is_favorite: bool,
     expected_revision: i64,
+    source: crate::database::ChangeSource,
 ) -> Result<(), String> {
     let mut connection = open(repository_root)?;
     let transaction = begin_immediate(&mut connection, "お気に入りの更新")?;
@@ -947,7 +964,7 @@ pub fn set_favorite_with_revision(
         "archive",
         archive_id,
         "favorite_changed",
-        crate::database::ChangeSource::Gui,
+        source,
         if is_favorite {
             "お気に入りに追加"
         } else {
@@ -964,6 +981,7 @@ pub fn rename_tag_group_with_revision(
     group_id: i64,
     name: &str,
     expected_revision: i64,
+    source: crate::database::ChangeSource,
 ) -> Result<(), String> {
     let name = validate_group_name(name)?;
     let mut connection = open(repository_root)?;
@@ -983,7 +1001,7 @@ pub fn rename_tag_group_with_revision(
         "tag_group",
         &group_id.to_string(),
         "renamed",
-        crate::database::ChangeSource::Gui,
+        source,
         &format!("グループ名を「{name}」へ変更"),
     )?;
     transaction
@@ -995,6 +1013,7 @@ pub fn delete_tag_group_with_revision(
     repository_root: &Path,
     group_id: i64,
     expected_revision: i64,
+    source: crate::database::ChangeSource,
 ) -> Result<(), String> {
     let mut connection = open(repository_root)?;
     let transaction = begin_immediate(&mut connection, "タググループの削除")?;
@@ -1026,7 +1045,7 @@ pub fn delete_tag_group_with_revision(
         "tag_group",
         &group_id.to_string(),
         "deleted",
-        crate::database::ChangeSource::Gui,
+        source,
         "タググループを削除",
     )?;
     transaction
@@ -1039,6 +1058,7 @@ pub fn move_tag_with_revision(
     tag_id: i64,
     parent_id: Option<i64>,
     expected_revision: i64,
+    source: crate::database::ChangeSource,
 ) -> Result<(), String> {
     let mut connection = open(repository_root)?;
     let transaction = begin_immediate(&mut connection, "タグの移動")?;
@@ -1065,7 +1085,7 @@ pub fn move_tag_with_revision(
         "tag",
         &tag_id.to_string(),
         "moved",
-        crate::database::ChangeSource::Gui,
+        source,
         "タググループを変更",
     )?;
     transaction
@@ -1078,6 +1098,7 @@ pub fn move_tag_group_with_revision(
     group_id: i64,
     parent_id: Option<i64>,
     expected_revision: i64,
+    source: crate::database::ChangeSource,
 ) -> Result<(), String> {
     let mut connection = open(repository_root)?;
     let transaction = begin_immediate(&mut connection, "タググループの移動")?;
@@ -1124,7 +1145,7 @@ pub fn move_tag_group_with_revision(
         "tag_group",
         &group_id.to_string(),
         "moved",
-        crate::database::ChangeSource::Gui,
+        source,
         "タググループの親を変更",
     )?;
     transaction
@@ -1138,6 +1159,7 @@ pub fn add_tag_to_archives_with_revisions(
     category: &str,
     name: &str,
     expected_revisions: &BTreeMap<String, i64>,
+    source: crate::database::ChangeSource,
 ) -> Result<TagSummary, String> {
     if !TAG_CATEGORIES.contains(&category) {
         return Err("タグの分類が不正です。".to_string());
@@ -1196,7 +1218,7 @@ pub fn add_tag_to_archives_with_revisions(
             "archive",
             archive_id,
             "tag_added",
-            crate::database::ChangeSource::Gui,
+            source,
             &format!("タグ「{name}」を追加"),
         )?;
     }
@@ -1211,7 +1233,7 @@ pub fn add_tag_to_archives_with_revisions(
         "tag",
         &tag_id.to_string(),
         "linked",
-        crate::database::ChangeSource::Gui,
+        source,
         &format!("タグ「{name}」を作品へ追加"),
     )?;
     transaction
@@ -1231,6 +1253,7 @@ pub fn remove_tag_from_archives_with_revisions(
     tag_id: i64,
     expected_revisions: &BTreeMap<String, i64>,
     expected_tag_revision: i64,
+    source: crate::database::ChangeSource,
 ) -> Result<(), String> {
     let archive_ids = archive_ids
         .iter()
@@ -1263,7 +1286,7 @@ pub fn remove_tag_from_archives_with_revisions(
             "archive",
             archive_id,
             "tag_removed",
-            crate::database::ChangeSource::Gui,
+            source,
             "タグを削除",
         )?;
     }
@@ -1281,7 +1304,7 @@ pub fn remove_tag_from_archives_with_revisions(
         "tag",
         &tag_id.to_string(),
         "unlinked",
-        crate::database::ChangeSource::Gui,
+        source,
         "タグを作品から削除",
     )?;
     transaction

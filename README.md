@@ -67,6 +67,20 @@ Snap版VS CodeでWebKitが`libpthread.so.0`のシンボルエラーを出す場�
 npm run build
 ```
 
+## MCPサーバー
+
+AppImageまたはビルド済み実行ファイルを`--mcp`モードで起動すると、標準入出力を使うMCPサーバーとして動作します。
+
+```bash
+Fairy Comic Library.AppImage \
+  --mcp \
+  --repository /path/to/library-repository
+```
+
+MCPクライアントには実行ファイルをコマンド、`--mcp --repository <リポジトリ>`を引数として登録します。初回利用前にGUIでリポジトリを作成しておいてください。MCPは作品・タグの参照、お気に入り、タグ、タググループの更新を提供します。更新ツールには一覧から取得した`revision`または`expectedRevisions`が必要で、古い値による上書きは競合エラーになります。
+
+MCPのstdoutはJSON-RPCプロトコル専用です。ログやエラーはstderrへ出力されます。
+
 ## リリースビルド
 
 アプリのバージョンは `package.json` の `version` を唯一の定義元とします。更新時は `npm version <新しい番号> --no-git-tag-version` を使うと、`package-lock.json` も同期されます。Tauri は設定から `package.json` を読み込みます。

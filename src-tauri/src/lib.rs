@@ -4,6 +4,7 @@ mod database;
 mod importing;
 mod library;
 mod maintenance;
+mod mcp;
 mod repository;
 mod services;
 mod thumbnails;
@@ -75,6 +76,10 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Fairy Comic Library");
+}
+
+pub fn run_mcp(repository_path: &std::path::Path) -> Result<(), String> {
+    mcp::run(repository_path)
 }
 
 fn thumbnail_response(
