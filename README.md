@@ -82,6 +82,62 @@ MCPクライアントには実行ファイルをコマンド、`--mcp --reposito
 MCPのstdoutはJSON-RPCプロトコル専用です。ログやエラーはstderrへ出力されます。
 MCPの更新はUnix Socket経由ですぐにGUIへ通知され、一覧・タグ・詳細が再読み込みされます。通知できない場合も、GUIが変更履歴のリビジョンを定期確認して同期します。
 
+### MCPクライアントの設定例
+
+VS Codeの`.vscode/mcp.json`例:
+
+```json
+{
+  "servers": {
+    "fairy-comic-library": {
+      "type": "stdio",
+      "command": "/home/your-name/Downloads/Fairy Comic Library.AppImage",
+      "args": [
+        "--mcp",
+        "--repository",
+        "/home/your-name/Comics"
+      ]
+    }
+  }
+}
+```
+
+Claude Desktopの設定例:
+
+```json
+{
+  "mcpServers": {
+    "fairy-comic-library": {
+      "command": "/home/your-name/Downloads/Fairy Comic Library.AppImage",
+      "args": [
+        "--mcp",
+        "--repository",
+        "/home/your-name/Comics"
+      ]
+    }
+  }
+}
+```
+
+パスにはスペースを含められますが、MCP設定の`command`と`args`は分離してください。シェル経由で起動する必要はありません。
+
+### 安全な更新手順
+
+1. `list_archives`、`list_tags`、`list_tag_groups`で対象と現在の`revision`を取得します。
+2. 更新ツールへその値を`expectedRevision`または`expectedRevisions`として渡します。
+3. `isError`が`true`で競合エラーの場合は、対象を再読込してユーザーへ変更内容を確認してから再実行します。
+4. 複数作品のタグ追加・削除は同じリクエストで行い、部分成功を前提にせずトランザクション単位で扱います。
+
+MCPから公開する操作:
+
+| 種別 | ツール |
+| --- | --- |
+| 参照 | `get_repository_status`、`list_archives`、`list_tags`、`list_tag_groups` |
+| 作品 | `set_favorite`、`add_tag_to_archives`、`remove_tag_from_archives` |
+| タグ・グループ | `create_tag_group`、`rename_tag_group`、`delete_tag_group`、`move_tag`、`move_tag_group` |
+
+インポート、バックアップ、変換、サムネイル差し替え、管理対象外への移動、外部ビューアー起動はMCPへ公開していません。
+
 ## リリースビルド
 
 アプリのバージョンは `package.json` の `version` を唯一の定義元とします。更新時は `npm version <新しい番号> --no-git-tag-version` を使うと、`package-lock.json` も同期されます。Tauri は設定から `package.json` を読み込みます。
