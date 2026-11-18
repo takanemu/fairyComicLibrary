@@ -8,6 +8,7 @@ type Props = {
   onSelect: (additive: boolean, range: boolean) => void;
   onOpen: () => void;
   onToggleFavorite: () => void;
+  highlighted: boolean;
 };
 
 function filenameWithoutTags(filename: string) {
@@ -35,7 +36,14 @@ function filenameWithoutTags(filename: string) {
   return [...preservedTags, remaining].filter(Boolean).join(" ");
 }
 
-export function ArchiveCard({ archive, selected, onSelect, onOpen, onToggleFavorite }: Props) {
+export function ArchiveCard({
+  archive,
+  selected,
+  onSelect,
+  onOpen,
+  onToggleFavorite,
+  highlighted,
+}: Props) {
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const url = thumbnailUrl(archive.archiveId);
   const displayFilename = filenameWithoutTags(archive.filename);
@@ -71,7 +79,9 @@ export function ArchiveCard({ archive, selected, onSelect, onOpen, onToggleFavor
       className={`group relative overflow-hidden rounded-xl border bg-white/[0.025] transition ${
         selected
           ? "border-violet-300/50 ring-1 ring-violet-300/30"
-          : "border-white/[0.06] hover:border-white/[0.14]"
+          : highlighted
+            ? "border-cyan-300/60 ring-2 ring-cyan-300/20 animate-pulse"
+            : "border-white/[0.06] hover:border-white/[0.14]"
       }`}
     >
       <button

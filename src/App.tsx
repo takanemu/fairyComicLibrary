@@ -65,6 +65,16 @@ type ImportOutcome =
       relativePath: string;
     };
 
+type ChangeRecord = {
+  revision: number;
+  entityType: "archive" | "tag" | "tag_group";
+  entityId: string;
+  operation: string;
+  source: "gui" | "mcp" | "system";
+  summary: string;
+  changedAt: string;
+};
+
 const videoExtensions = new Set(["mkv", "mp4"]);
 const packageImageExtensions = new Set(["png", "webp", "jpg", "jpeg", "gif", "bmp"]);
 const SIDEBAR_WIDTH_KEY = "fairyComicLibrary.sidebarWidth";
@@ -389,12 +399,15 @@ function App() {
 
   const bumpVersion = useCallback(() => setVersion((current) => current + 1), []);
   const changeRevisionRef = useRef<number | null>(null);
+  const [mcpChanges, setMcpChanges] = useState<ChangeRecord[]>([]);
 
   useEffect(() => {
     if (!repository || !("__TAURI_INTERNALS__" in window)) {
       changeRevisionRef.current = null;
+      setMcpChanges([]);
       return;
     }
+    setMcpChanges([]);
     let active = true;
     let unlisten: (() => void) | undefined;
     const refreshRevision = async () => {
@@ -404,6 +417,13 @@ function App() {
         const previous = changeRevisionRef.current;
         changeRevisionRef.current = revision;
         if (previous !== null && revision !== previous) {
+          const changes = await invoke<ChangeRecord[]>("list_changes_after", {
+            afterRevision: previous,
+          });
+          const aiChanges = changes.filter((change) => change.source === "mcp");
+          if (active && aiChanges.length > 0) {
+            setMcpChanges(aiChanges);
+          }
           bumpVersion();
         }
       } catch (reason) {
@@ -434,6 +454,22 @@ function App() {
       unlisten?.();
     };
   }, [repository?.path, bumpVersion]);
+
+  useEffect(() => {
+    if (mcpChanges.length === 0) return;
+    const timer = window.setTimeout(() => setMcpChanges([]), 12_000);
+    return () => window.clearTimeout(timer);
+  }, [mcpChanges]);
+
+  const highlightedArchiveIds = useMemo(
+    () =>
+      new Set(
+        mcpChanges
+          .filter((change) => change.entityType === "archive")
+          .map((change) => change.entityId),
+      ),
+    [mcpChanges],
+  );
 
   async function createGroup(category: TagCategory, name: string, parentId: number | null) {
     setError(null);
@@ -1023,6 +1059,43 @@ function App() {
           )}
 
           <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain">
+            {mcpChanges.length > 0 && (
+              <div
+                className="mb-5 flex items-start gap-3 rounded-xl border border-cyan-300/25 bg-cyan-300/[0.07] px-4 py-3 text-xs text-cyan-100"
+                role="status"
+              >
+                <span
+                  aria-hidden="true"
+                  className="grid size-7 shrink-0 place-items-center rounded-full bg-cyan-300/10 text-sm"
+                >
+                  AI
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="font-medium">MCPがライブラリを更新しました</p>
+                  <ul className="mt-1 space-y-0.5 text-cyan-100/80">
+                    {mcpChanges.slice(-4).map((change) => (
+                      <li className="break-all" key={change.revision}>
+                        {change.summary}
+                      </li>
+                    ))}
+                  </ul>
+                  {mcpChanges.length > 4 && (
+                    <p className="mt-1 text-cyan-100/60">
+                      ほか {mcpChanges.length - 4} 件
+                    </p>
+                  )}
+                </div>
+                <button
+                  aria-label="AI変更通知を閉じる"
+                  className="rounded p-1 text-cyan-100/60 hover:bg-cyan-200/10 hover:text-cyan-50"
+                  onClick={() => setMcpChanges([])}
+                  type="button"
+                >
+                  ×
+                </button>
+              </div>
+            )}
+
             {repository && repository.warnings.length > 0 && (
               <div
                 className="mb-5 space-y-1 rounded-xl border border-amber-300/25 bg-amber-300/[0.06] px-4 py-3 text-xs leading-5 text-amber-200"
@@ -1058,6 +1131,7 @@ function App() {
 
             {repository ? (
               <LibraryView
+                highlightedArchiveIds={highlightedArchiveIds}
                 isFiltered={isFiltered}
                 onConvertComplete={handleConvertComplete}
                 onConvertingChange={handleConvertingChange}

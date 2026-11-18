@@ -26,6 +26,18 @@ pub struct ChangeNotification {
     pub revision: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRecord {
+    pub revision: i64,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub operation: String,
+    pub source: String,
+    pub summary: String,
+    pub changed_at: String,
+}
+
 fn runtime_directory() -> Result<PathBuf, String> {
     let uid = unsafe { libc::geteuid() };
     let directory = std::env::temp_dir().join(format!("fairy-comic-library-{uid}"));
@@ -129,6 +141,36 @@ pub fn latest_change_revision(repository_root: &Path) -> Result<i64, String> {
         .map_err(|error| format!("変更履歴の版を読み取れませんでした: {error}"))
 }
 
+pub fn changes_after(
+    repository_root: &Path,
+    after_revision: i64,
+) -> Result<Vec<ChangeRecord>, String> {
+    let connection = rusqlite::Connection::open(repository_root.join("database/library.sqlite3"))
+        .map_err(|error| format!("変更履歴のDBを開けませんでした: {error}"))?;
+    let mut statement = connection
+        .prepare(
+            "SELECT revision, entity_type, entity_id, operation, source, summary, changed_at
+             FROM library_changes
+             WHERE revision > ?1
+             ORDER BY revision ASC",
+        )
+        .map_err(|error| format!("変更履歴の取得を準備できませんでした: {error}"))?;
+    statement
+        .query_map([after_revision], |row| {
+            Ok(ChangeRecord {
+                revision: row.get(0)?,
+                entity_type: row.get(1)?,
+                entity_id: row.get(2)?,
+                operation: row.get(3)?,
+                source: row.get(4)?,
+                summary: row.get(5)?,
+                changed_at: row.get(6)?,
+            })
+        })
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(|error| format!("変更履歴を読み取れませんでした: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::ChangeNotification;
@@ -150,5 +192,39 @@ mod tests {
             serde_json::from_slice(&bytes).expect("parse notification");
         assert_eq!(notification.revision, 7);
         std::fs::remove_file(path).expect("remove socket");
+    }
+
+    #[test]
+    fn reads_changes_after_revision_in_order() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        std::fs::create_dir_all(repository.path().join("database"))
+            .expect("create database directory");
+        crate::database::initialize(&repository.path().join("database/library.sqlite3"))
+            .expect("initialize");
+        let mut connection =
+            rusqlite::Connection::open(repository.path().join("database/library.sqlite3"))
+                .expect("open database");
+        for source in [
+            crate::database::ChangeSource::Gui,
+            crate::database::ChangeSource::Mcp,
+        ] {
+            let transaction = connection.transaction().expect("transaction");
+            crate::database::record_change(
+                &transaction,
+                "archive",
+                "ab",
+                "tag_added",
+                source,
+                "タグを追加",
+            )
+            .expect("record");
+            transaction.commit().expect("commit");
+        }
+        drop(connection);
+
+        let changes = super::changes_after(repository.path(), 1).expect("changes");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].revision, 2);
+        assert_eq!(changes[0].source, "mcp");
     }
 }

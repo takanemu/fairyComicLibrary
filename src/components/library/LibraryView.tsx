@@ -32,6 +32,7 @@ type Props = {
   onCountChange: (count: number | null) => void;
   onConvertingChange: (busy: boolean) => void;
   onConvertComplete: (filename: string, result: ConvertResult) => void;
+  highlightedArchiveIds: Set<string>;
 };
 
 export function LibraryView({
@@ -45,6 +46,7 @@ export function LibraryView({
   onCountChange,
   onConvertingChange,
   onConvertComplete,
+  highlightedArchiveIds,
 }: Props) {
   const [archives, setArchives] = useState<ArchiveSummary[] | null>(null);
   useEffect(() => {
@@ -284,6 +286,7 @@ export function LibraryView({
           <li key={archive.archiveId}>
             <ArchiveCard
               archive={archive}
+              highlighted={highlightedArchiveIds.has(archive.archiveId)}
               onSelect={(additive, range) =>
                 selectArchive(archive.archiveId, additive, range)
               }

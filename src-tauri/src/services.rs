@@ -46,6 +46,13 @@ impl LibraryService {
         crate::sync::latest_change_revision(&self.repository_root)
     }
 
+    pub fn changes_after(
+        &self,
+        after_revision: i64,
+    ) -> Result<Vec<crate::sync::ChangeRecord>, String> {
+        crate::sync::changes_after(&self.repository_root, after_revision)
+    }
+
     pub fn get_video_duration(&self, archive_id: &str) -> Result<u64, String> {
         let (path, format) = maintenance::archive_for_open(&self.repository_root, archive_id)?;
         video::duration_seconds(&path, &format)

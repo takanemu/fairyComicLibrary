@@ -70,6 +70,14 @@ pub fn get_change_revision(state: State<'_, AppState>) -> Result<i64, String> {
     current_service(&state)?.latest_change_revision()
 }
 
+#[tauri::command(async)]
+pub fn list_changes_after(
+    after_revision: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::sync::ChangeRecord>, String> {
+    current_service(&state)?.changes_after(after_revision)
+}
+
 #[tauri::command]
 pub async fn import_archive(
     path: String,

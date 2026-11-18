@@ -82,6 +82,7 @@ pub fn run() {
             commands::convert_archive,
             commands::cancel_conversion,
             commands::get_change_revision,
+            commands::list_changes_after,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Fairy Comic Library");
