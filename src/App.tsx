@@ -401,7 +401,9 @@ function App() {
   async function renameGroup(groupId: number, name: string) {
     setError(null);
     try {
-      await renameTagGroup(groupId, name);
+      const group = tagGroups.find((candidate) => candidate.id === groupId);
+      if (!group) throw new Error("タググループが見つかりません。");
+      await renameTagGroup(group, name);
       bumpVersion();
     } catch (reason) {
       setError(`グループを更新できませんでした: ${String(reason)}`);
@@ -411,7 +413,9 @@ function App() {
   async function removeGroup(groupId: number) {
     setError(null);
     try {
-      await deleteTagGroup(groupId);
+      const group = tagGroups.find((candidate) => candidate.id === groupId);
+      if (!group) throw new Error("タググループが見つかりません。");
+      await deleteTagGroup(group);
       bumpVersion();
     } catch (reason) {
       setError(`グループを削除できませんでした: ${String(reason)}`);
@@ -421,7 +425,9 @@ function App() {
   async function relocateGroup(groupId: number, parentId: number | null) {
     setError(null);
     try {
-      await moveTagGroup(groupId, parentId);
+      const group = tagGroups.find((candidate) => candidate.id === groupId);
+      if (!group) throw new Error("タググループが見つかりません。");
+      await moveTagGroup(group, parentId);
       bumpVersion();
     } catch (reason) {
       setError(`グループを移動できませんでした: ${String(reason)}`);
@@ -431,7 +437,9 @@ function App() {
   async function updateTagParent(tagId: number, parentId: number | null) {
     setError(null);
     try {
-      await moveTag(tagId, parentId);
+      const tag = tags.find((candidate) => candidate.id === tagId);
+      if (!tag) throw new Error("タグが見つかりません。");
+      await moveTag(tag, parentId);
       bumpVersion();
     } catch (reason) {
       setError(`タグを移動できませんでした: ${String(reason)}`);

@@ -8,7 +8,12 @@ export const tagCategories: { value: TagCategory; label: string }[] = [
   { value: "classification", label: "分類" },
 ];
 
-export type Tag = { id: number; name: string; category: TagCategory };
+export type Tag = {
+  id: number;
+  name: string;
+  category: TagCategory;
+  revision: number;
+};
 export type TagWithCount = Tag & {
   archiveCount: number;
   groupId: number | null;
@@ -18,6 +23,7 @@ export type TagGroup = {
   name: string;
   category: TagCategory;
   parentId: number | null;
+  revision: number;
 };
 
 export type ArchiveSummary = {
@@ -32,6 +38,7 @@ export type ArchiveSummary = {
   isFavorite: boolean;
   hasThumbnail: boolean;
   tags: Tag[];
+  revision: number;
 };
 
 export type ArchiveSortBy =
@@ -115,32 +122,83 @@ export const createTagGroup = (
   name: string,
   parentId: number | null = null,
 ) => invoke<TagGroup>("create_tag_group", { category, name, parentId });
-export const renameTagGroup = (groupId: number, name: string) =>
-  invoke<void>("rename_tag_group", { groupId, name });
-export const deleteTagGroup = (groupId: number) =>
-  invoke<void>("delete_tag_group", { groupId });
-export const moveTag = (tagId: number, parentId: number | null) =>
-  invoke<void>("move_tag", { tagId, parentId });
-export const moveTagGroup = (groupId: number, parentId: number | null) =>
-  invoke<void>("move_tag_group", { groupId, parentId });
+export const renameTagGroup = (group: TagGroup, name: string) =>
+  invoke<void>("rename_tag_group", {
+    groupId: group.id,
+    name,
+    expectedRevision: group.revision,
+  });
+export const deleteTagGroup = (group: TagGroup) =>
+  invoke<void>("delete_tag_group", {
+    groupId: group.id,
+    expectedRevision: group.revision,
+  });
+export const moveTag = (tag: TagWithCount, parentId: number | null) =>
+  invoke<void>("move_tag", {
+    tagId: tag.id,
+    parentId,
+    expectedRevision: tag.revision,
+  });
+export const moveTagGroup = (group: TagGroup, parentId: number | null) =>
+  invoke<void>("move_tag_group", {
+    groupId: group.id,
+    parentId,
+    expectedRevision: group.revision,
+  });
 
-export const setFavorite = (archiveId: string, isFavorite: boolean) =>
-  invoke<void>("set_favorite", { archiveId, isFavorite });
+export const setFavorite = (
+  archive: Pick<ArchiveSummary, "archiveId" | "revision">,
+  isFavorite: boolean,
+) =>
+  invoke<void>("set_favorite", {
+    archiveId: archive.archiveId,
+    isFavorite,
+    expectedRevision: archive.revision,
+  });
 
-export const addTag = (archiveId: string, category: TagCategory, name: string) =>
-  invoke<Tag>("add_tag", { archiveId, category, name });
-
-export const addTagToArchives = (
-  archiveIds: string[],
+export const addTag = (
+  archive: ArchiveSummary,
   category: TagCategory,
   name: string,
-) => invoke<Tag>("add_tag_to_archives", { archiveIds, category, name });
+) =>
+  invoke<Tag>("add_tag", {
+    archiveId: archive.archiveId,
+    category,
+    name,
+    expectedRevision: archive.revision,
+  });
 
-export const removeTag = (archiveId: string, tagId: number) =>
-  invoke<void>("remove_tag", { archiveId, tagId });
+export const addTagToArchives = (
+  archives: ArchiveSummary[],
+  category: TagCategory,
+  name: string,
+) =>
+  invoke<Tag>("add_tag_to_archives", {
+    archiveIds: archives.map((archive) => archive.archiveId),
+    category,
+    name,
+    expectedRevisions: Object.fromEntries(
+      archives.map((archive) => [archive.archiveId, archive.revision]),
+    ),
+  });
 
-export const removeTagFromArchives = (archiveIds: string[], tagId: number) =>
-  invoke<void>("remove_tag_from_archives", { archiveIds, tagId });
+export const removeTag = (archive: ArchiveSummary, tag: Tag) =>
+  invoke<void>("remove_tag", {
+    archiveId: archive.archiveId,
+    tagId: tag.id,
+    expectedRevision: archive.revision,
+    expectedTagRevision: tag.revision,
+  });
+
+export const removeTagFromArchives = (archives: ArchiveSummary[], tag: Tag) =>
+  invoke<void>("remove_tag_from_archives", {
+    archiveIds: archives.map((archive) => archive.archiveId),
+    tagId: tag.id,
+    expectedRevisions: Object.fromEntries(
+      archives.map((archive) => [archive.archiveId, archive.revision]),
+    ),
+    expectedTagRevision: tag.revision,
+  });
 
 export type UnmanageSummary = {
   moved: number;

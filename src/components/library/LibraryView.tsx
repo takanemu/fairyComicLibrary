@@ -100,7 +100,7 @@ export function LibraryView({
 
   const toggleFavorite = (archive: ArchiveSummary) =>
     mutate(
-      () => setFavorite(archive.archiveId, !archive.isFavorite),
+      () => setFavorite(archive, !archive.isFavorite),
       "お気に入りを更新できませんでした",
     );
 
@@ -186,11 +186,7 @@ export function LibraryView({
   const addTagToSelection = async (category: TagCategory, name: string) => {
     return runBulkTag(
       () =>
-        addTagToArchives(
-          selected.map((archive) => archive.archiveId),
-          category,
-          name,
-        ),
+        addTagToArchives(selected, category, name),
       "選択作品へのタグ追加に失敗しました",
     );
   };
@@ -199,12 +195,10 @@ export function LibraryView({
     const targets = selected.filter((archive) =>
       archive.tags.some((tag) => tag.id === tagId),
     );
+    const tag = targets[0]?.tags.find((candidate) => candidate.id === tagId);
+    if (!tag) return;
     void runBulkTag(
-      () =>
-        removeTagFromArchives(
-          targets.map((archive) => archive.archiveId),
-          tagId,
-        ),
+      () => removeTagFromArchives(targets, tag),
       "選択作品からタグを外せませんでした",
     );
   };
@@ -213,7 +207,7 @@ export function LibraryView({
     const nextFavorite = selected.some((archive) => !archive.isFavorite);
     void runBulk(
       selected,
-      (archive) => setFavorite(archive.archiveId, nextFavorite),
+      (archive) => setFavorite(archive, nextFavorite),
       "選択作品のお気に入りを更新できませんでした",
     );
   };
@@ -318,7 +312,7 @@ export function LibraryView({
           }
           onAddTag={(category: TagCategory, name: string) =>
             mutate(
-              () => addTag(selected[0].archiveId, category, name),
+              () => addTag(selected[0], category, name),
               "タグを追加できませんでした",
             )
           }
@@ -328,7 +322,14 @@ export function LibraryView({
           unmanageBusy={bulkBusy}
           onRemoveTag={(tagId) =>
             mutate(
-              () => removeTag(selected[0].archiveId, tagId),
+              () => {
+                const tag = selected[0].tags.find(
+                  (candidate) => candidate.id === tagId,
+                );
+                return tag
+                  ? removeTag(selected[0], tag)
+                  : Promise.reject("タグが見つかりません。");
+              },
               "タグを外せませんでした",
             )
           }

@@ -1,5 +1,6 @@
 use crate::{conversion, importing, library, maintenance, repository, video};
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -55,24 +56,59 @@ impl LibraryService {
         library::create_tag_group(&self.repository_root, category, name, parent_id)
     }
 
-    pub fn rename_tag_group(&self, group_id: i64, name: &str) -> Result<(), String> {
-        library::rename_tag_group(&self.repository_root, group_id, name)
+    pub fn rename_tag_group(
+        &self,
+        group_id: i64,
+        name: &str,
+        expected_revision: i64,
+    ) -> Result<(), String> {
+        library::rename_tag_group_with_revision(
+            &self.repository_root,
+            group_id,
+            name,
+            expected_revision,
+        )
     }
 
-    pub fn delete_tag_group(&self, group_id: i64) -> Result<(), String> {
-        library::delete_tag_group(&self.repository_root, group_id)
+    pub fn delete_tag_group(&self, group_id: i64, expected_revision: i64) -> Result<(), String> {
+        library::delete_tag_group_with_revision(&self.repository_root, group_id, expected_revision)
     }
 
-    pub fn move_tag(&self, tag_id: i64, parent_id: Option<i64>) -> Result<(), String> {
-        library::move_tag(&self.repository_root, tag_id, parent_id)
+    pub fn move_tag(
+        &self,
+        tag_id: i64,
+        parent_id: Option<i64>,
+        expected_revision: i64,
+    ) -> Result<(), String> {
+        library::move_tag_with_revision(&self.repository_root, tag_id, parent_id, expected_revision)
     }
 
-    pub fn move_tag_group(&self, group_id: i64, parent_id: Option<i64>) -> Result<(), String> {
-        library::move_tag_group(&self.repository_root, group_id, parent_id)
+    pub fn move_tag_group(
+        &self,
+        group_id: i64,
+        parent_id: Option<i64>,
+        expected_revision: i64,
+    ) -> Result<(), String> {
+        library::move_tag_group_with_revision(
+            &self.repository_root,
+            group_id,
+            parent_id,
+            expected_revision,
+        )
     }
 
-    pub fn set_favorite(&self, archive_id: &str, is_favorite: bool) -> Result<(), String> {
-        library::set_favorite(&self.repository_root, archive_id, is_favorite)
+    pub fn set_favorite(
+        &self,
+        archive_id: &str,
+        is_favorite: bool,
+        expected_revision: i64,
+    ) -> Result<(), String> {
+        library::set_favorite_with_revision(
+            &self.repository_root,
+            archive_id,
+            is_favorite,
+            expected_revision,
+        )
     }
 
     pub fn add_tag(
@@ -80,8 +116,14 @@ impl LibraryService {
         archive_id: &str,
         category: &str,
         name: &str,
+        expected_revision: i64,
     ) -> Result<library::TagSummary, String> {
-        library::add_tag(&self.repository_root, archive_id, category, name)
+        self.add_tag_to_archives(
+            &[archive_id.to_string()],
+            category,
+            name,
+            &BTreeMap::from([(archive_id.to_string(), expected_revision)]),
+        )
     }
 
     pub fn add_tag_to_archives(
@@ -89,20 +131,46 @@ impl LibraryService {
         archive_ids: &[String],
         category: &str,
         name: &str,
+        expected_revisions: &BTreeMap<String, i64>,
     ) -> Result<library::TagSummary, String> {
-        library::add_tag_to_archives(&self.repository_root, archive_ids, category, name)
+        library::add_tag_to_archives_with_revisions(
+            &self.repository_root,
+            archive_ids,
+            category,
+            name,
+            expected_revisions,
+        )
     }
 
-    pub fn remove_tag(&self, archive_id: &str, tag_id: i64) -> Result<(), String> {
-        library::remove_tag(&self.repository_root, archive_id, tag_id)
+    pub fn remove_tag(
+        &self,
+        archive_id: &str,
+        tag_id: i64,
+        expected_revision: i64,
+        expected_tag_revision: i64,
+    ) -> Result<(), String> {
+        self.remove_tag_from_archives(
+            &[archive_id.to_string()],
+            tag_id,
+            &BTreeMap::from([(archive_id.to_string(), expected_revision)]),
+            expected_tag_revision,
+        )
     }
 
     pub fn remove_tag_from_archives(
         &self,
         archive_ids: &[String],
         tag_id: i64,
+        expected_revisions: &BTreeMap<String, i64>,
+        expected_tag_revision: i64,
     ) -> Result<(), String> {
-        library::remove_tag_from_archives(&self.repository_root, archive_ids, tag_id)
+        library::remove_tag_from_archives_with_revisions(
+            &self.repository_root,
+            archive_ids,
+            tag_id,
+            expected_revisions,
+            expected_tag_revision,
+        )
     }
 
     pub async fn import_archive(
@@ -217,6 +285,7 @@ mod tests {
     use super::LibraryService;
     use crate::{database, library::ArchiveQuery};
     use rusqlite::Connection;
+    use std::collections::BTreeMap;
 
     #[test]
     fn gui_and_mcp_can_share_library_operations() {
@@ -245,7 +314,7 @@ mod tests {
         let mcp_service = LibraryService::new(repository.path().to_path_buf());
 
         gui_service
-            .set_favorite(&archive_id, true)
+            .set_favorite(&archive_id, true, 0)
             .expect("GUI update");
         let archives = mcp_service
             .list_archives(&ArchiveQuery::default())
@@ -253,11 +322,68 @@ mod tests {
         assert!(archives[0].is_favorite);
 
         let tag = mcp_service
-            .add_tag(&archive_id, "author", "Shared author")
+            .add_tag(&archive_id, "author", "Shared author", 1)
             .expect("MCP update");
         let archives = gui_service
             .list_archives(&ArchiveQuery::default())
             .expect("GUI read");
         assert_eq!(archives[0].tags, vec![tag]);
+
+        let conflict = mcp_service
+            .set_favorite(&archive_id, false, 1)
+            .expect_err("stale revision must fail");
+        assert!(conflict.contains("他のユーザーまたはAI"));
+    }
+
+    #[test]
+    fn bulk_revision_conflict_rolls_back_every_archive() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        std::fs::create_dir_all(repository.path().join("database"))
+            .expect("create database directory");
+        database::initialize(&repository.path().join("database/library.sqlite3"))
+            .expect("initialize database");
+        let archive_ids = ["ab".repeat(32), "cd".repeat(32)];
+        let connection =
+            Connection::open(repository.path().join("database/library.sqlite3")).expect("open db");
+        for (index, archive_id) in archive_ids.iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT INTO archives (
+                        archive_id, original_filename, relative_path, format,
+                        file_size, imported_at
+                     ) VALUES (?1, ?2, ?3, 'cbz', 1, '2026-11-18T00:00:00Z')",
+                    rusqlite::params![
+                        archive_id,
+                        format!("{index}.cbz"),
+                        format!("archives/{}/{}.cbz", &archive_id[..2], index)
+                    ],
+                )
+                .expect("insert archive");
+        }
+        drop(connection);
+
+        let service = LibraryService::new(repository.path().to_path_buf());
+        let error = service
+            .add_tag_to_archives(
+                &archive_ids.to_vec(),
+                "author",
+                "Must roll back",
+                &BTreeMap::from([(archive_ids[0].clone(), 0), (archive_ids[1].clone(), 1)]),
+            )
+            .expect_err("second archive revision must conflict");
+        assert!(error.contains("他のユーザーまたはAI"));
+
+        let archives = service
+            .list_archives(&ArchiveQuery::default())
+            .expect("list archives");
+        assert!(archives.iter().all(|archive| archive.tags.is_empty()));
+        assert!(archives.iter().all(|archive| archive.revision == 0));
+        assert!(service.list_tags().expect("list tags").is_empty());
+        let connection =
+            Connection::open(repository.path().join("database/library.sqlite3")).expect("open db");
+        let changes: i64 = connection
+            .query_row("SELECT COUNT(*) FROM library_changes", [], |row| row.get(0))
+            .expect("count changes");
+        assert_eq!(changes, 0);
     }
 }

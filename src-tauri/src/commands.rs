@@ -1,4 +1,5 @@
 use crate::{library, repository, services::LibraryService, AppState};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
 
@@ -111,41 +112,49 @@ pub fn create_tag_group(
 pub fn rename_tag_group(
     group_id: i64,
     name: String,
+    expected_revision: i64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    current_service(&state)?.rename_tag_group(group_id, &name)
+    current_service(&state)?.rename_tag_group(group_id, &name, expected_revision)
 }
 
 #[tauri::command(async)]
-pub fn delete_tag_group(group_id: i64, state: State<'_, AppState>) -> Result<(), String> {
-    current_service(&state)?.delete_tag_group(group_id)
+pub fn delete_tag_group(
+    group_id: i64,
+    expected_revision: i64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    current_service(&state)?.delete_tag_group(group_id, expected_revision)
 }
 
 #[tauri::command(async)]
 pub fn move_tag(
     tag_id: i64,
     parent_id: Option<i64>,
+    expected_revision: i64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    current_service(&state)?.move_tag(tag_id, parent_id)
+    current_service(&state)?.move_tag(tag_id, parent_id, expected_revision)
 }
 
 #[tauri::command(async)]
 pub fn move_tag_group(
     group_id: i64,
     parent_id: Option<i64>,
+    expected_revision: i64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    current_service(&state)?.move_tag_group(group_id, parent_id)
+    current_service(&state)?.move_tag_group(group_id, parent_id, expected_revision)
 }
 
 #[tauri::command(async)]
 pub fn set_favorite(
     archive_id: String,
     is_favorite: bool,
+    expected_revision: i64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    current_service(&state)?.set_favorite(&archive_id, is_favorite)
+    current_service(&state)?.set_favorite(&archive_id, is_favorite, expected_revision)
 }
 
 #[tauri::command(async)]
@@ -153,9 +162,10 @@ pub fn add_tag(
     archive_id: String,
     category: String,
     name: String,
+    expected_revision: i64,
     state: State<'_, AppState>,
 ) -> Result<library::TagSummary, String> {
-    current_service(&state)?.add_tag(&archive_id, &category, &name)
+    current_service(&state)?.add_tag(&archive_id, &category, &name, expected_revision)
 }
 
 #[tauri::command(async)]
@@ -163,27 +173,47 @@ pub fn add_tag_to_archives(
     archive_ids: Vec<String>,
     category: String,
     name: String,
+    expected_revisions: BTreeMap<String, i64>,
     state: State<'_, AppState>,
 ) -> Result<library::TagSummary, String> {
-    current_service(&state)?.add_tag_to_archives(&archive_ids, &category, &name)
+    current_service(&state)?.add_tag_to_archives(
+        &archive_ids,
+        &category,
+        &name,
+        &expected_revisions,
+    )
 }
 
 #[tauri::command(async)]
 pub fn remove_tag(
     archive_id: String,
     tag_id: i64,
+    expected_revision: i64,
+    expected_tag_revision: i64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    current_service(&state)?.remove_tag(&archive_id, tag_id)
+    current_service(&state)?.remove_tag(
+        &archive_id,
+        tag_id,
+        expected_revision,
+        expected_tag_revision,
+    )
 }
 
 #[tauri::command(async)]
 pub fn remove_tag_from_archives(
     archive_ids: Vec<String>,
     tag_id: i64,
+    expected_revisions: BTreeMap<String, i64>,
+    expected_tag_revision: i64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    current_service(&state)?.remove_tag_from_archives(&archive_ids, tag_id)
+    current_service(&state)?.remove_tag_from_archives(
+        &archive_ids,
+        tag_id,
+        &expected_revisions,
+        expected_tag_revision,
+    )
 }
 
 #[tauri::command]

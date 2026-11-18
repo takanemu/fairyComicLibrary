@@ -1,7 +1,9 @@
-use rusqlite::{named_params, params, Connection, OptionalExtension};
+use rusqlite::{
+    named_params, params, Connection, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::Path,
 };
 
@@ -15,15 +17,18 @@ pub struct TagSummary {
     pub id: i64,
     pub name: String,
     pub category: String,
+    pub revision: i64,
 }
 
 pub fn record_read(repository_root: &Path, archive_id: &str) -> Result<(), String> {
-    let connection = open(repository_root)?;
-    let changed = connection
+    let mut connection = open(repository_root)?;
+    let transaction = begin_immediate(&mut connection, "読書履歴の更新")?;
+    let changed = transaction
         .execute(
             "UPDATE archives
              SET last_read_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                 read_count = read_count + 1
+                 read_count = read_count + 1,
+                 revision = revision + 1
              WHERE archive_id = ?1 AND read_count < 9223372036854775807",
             [archive_id],
         )
@@ -31,7 +36,17 @@ pub fn record_read(repository_root: &Path, archive_id: &str) -> Result<(), Strin
     if changed == 0 {
         return Err("対象のアーカイブが見つからないか、読書回数が上限に達しています。".to_string());
     }
-    Ok(())
+    crate::database::record_change(
+        &transaction,
+        "archive",
+        archive_id,
+        "read",
+        crate::database::ChangeSource::Gui,
+        "読書履歴を更新",
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| format!("読書履歴の更新を確定できませんでした: {error}"))
 }
 
 #[derive(Debug, Serialize)]
@@ -42,6 +57,7 @@ pub struct TagWithCount {
     pub category: String,
     pub archive_count: u64,
     pub group_id: Option<i64>,
+    pub revision: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,6 +67,7 @@ pub struct TagGroup {
     pub name: String,
     pub category: String,
     pub parent_id: Option<i64>,
+    pub revision: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -66,6 +83,7 @@ pub struct ArchiveSummary {
     pub read_count: u64,
     pub is_favorite: bool,
     pub has_thumbnail: bool,
+    pub revision: i64,
     pub tags: Vec<TagSummary>,
 }
 
@@ -195,11 +213,7 @@ pub fn list_archives(
         let mut conditions = Vec::new();
 
         for (category, ids) in tag_by_category.iter() {
-            let ids_str = ids
-                .iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
+            let ids_str = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
             conditions.push(format!(
                 "EXISTS(SELECT 1 FROM archive_tags x JOIN tags t ON t.id = x.tag_id
                         WHERE x.archive_id = a.archive_id AND t.category = '{category}' AND t.id IN ({ids_str}))"
@@ -230,7 +244,7 @@ pub fn list_archives(
                 format!(
                     "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
                             a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
-                            a.thumbnail_relative_path IS NOT NULL
+                            a.thumbnail_relative_path IS NOT NULL, a.revision
                      FROM archives a
                      WHERE (:favorites = 0 OR a.is_favorite = 1)
                        {tag_filter}
@@ -245,7 +259,7 @@ pub fn list_archives(
                 format!(
                     "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
                             a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
-                            a.thumbnail_relative_path IS NOT NULL
+                            a.thumbnail_relative_path IS NOT NULL, a.revision
                      FROM archives a
                      WHERE (:favorites = 0 OR a.is_favorite = 1)
                        {tag_filter}
@@ -264,7 +278,7 @@ pub fn list_archives(
                 format!(
                     "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
                             a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
-                            a.thumbnail_relative_path IS NOT NULL
+                            a.thumbnail_relative_path IS NOT NULL, a.revision
                      FROM archives a
                      WHERE (:favorites = 0 OR a.is_favorite = 1)
                        {tag_filter}
@@ -276,7 +290,7 @@ pub fn list_archives(
                 format!(
                     "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
                             a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
-                            a.thumbnail_relative_path IS NOT NULL
+                            a.thumbnail_relative_path IS NOT NULL, a.revision
                      FROM archives a
                      WHERE (:favorites = 0 OR a.is_favorite = 1)
                        {tag_filter}
@@ -292,7 +306,7 @@ pub fn list_archives(
             format!(
                 "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
                         a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
-                        a.thumbnail_relative_path IS NOT NULL
+                        a.thumbnail_relative_path IS NOT NULL, a.revision
                  FROM archives a
                  WHERE (:favorites = 0 OR a.is_favorite = 1)
                    {tag_filter}
@@ -303,7 +317,7 @@ pub fn list_archives(
             format!(
                 "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
                         a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
-                        a.thumbnail_relative_path IS NOT NULL
+                        a.thumbnail_relative_path IS NOT NULL, a.revision
                  FROM archives a
                  WHERE (:favorites = 0 OR a.is_favorite = 1)
                    {tag_filter}
@@ -339,6 +353,7 @@ pub fn list_archives(
                         read_count: row.get::<_, i64>(7)?.max(0) as u64,
                         is_favorite: row.get::<_, i64>(8)? != 0,
                         has_thumbnail: row.get::<_, i64>(9)? != 0,
+                        revision: row.get(10)?,
                         tags: Vec::new(),
                     })
                 },
@@ -364,6 +379,7 @@ pub fn list_archives(
                         read_count: row.get::<_, i64>(7)?.max(0) as u64,
                         is_favorite: row.get::<_, i64>(8)? != 0,
                         has_thumbnail: row.get::<_, i64>(9)? != 0,
+                        revision: row.get(10)?,
                         tags: Vec::new(),
                     })
                 },
@@ -383,7 +399,7 @@ pub fn list_archives(
             .collect::<Vec<_>>()
             .join(",");
         let tag_sql = format!(
-            "SELECT x.archive_id, t.id, t.name, t.category
+            "SELECT x.archive_id, t.id, t.name, t.category, t.revision
              FROM archive_tags x JOIN tags t ON t.id = x.tag_id
              WHERE x.archive_id IN ({})",
             ids_param
@@ -400,6 +416,7 @@ pub fn list_archives(
                         id: row.get(1)?,
                         name: row.get(2)?,
                         category: row.get(3)?,
+                        revision: row.get(4)?,
                     },
                 ))
             })
@@ -412,9 +429,9 @@ pub fn list_archives(
         for archive in &mut archives {
             if let Some(mut tags) = tags_by_archive.remove(&archive.archive_id) {
                 tags.sort_by(|a, b| {
-                    a.category.cmp(&b.category).then_with(|| {
-                        a.name.to_lowercase().cmp(&b.name.to_lowercase())
-                    })
+                    a.category
+                        .cmp(&b.category)
+                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
                 });
                 archive.tags = tags;
             }
@@ -491,7 +508,7 @@ pub fn list_tags(repository_root: &Path) -> Result<Vec<TagWithCount>, String> {
     let connection = open(repository_root)?;
     let mut statement = connection
         .prepare(
-            "SELECT t.id, t.name, t.category, COUNT(x.archive_id), t.group_id
+            "SELECT t.id, t.name, t.category, COUNT(x.archive_id), t.group_id, t.revision
              FROM tags t LEFT JOIN archive_tags x ON x.tag_id = t.id
              GROUP BY t.id
              ORDER BY t.category, t.name COLLATE NOCASE",
@@ -505,6 +522,7 @@ pub fn list_tags(repository_root: &Path) -> Result<Vec<TagWithCount>, String> {
                 category: row.get(2)?,
                 archive_count: row.get::<_, i64>(3)?.max(0) as u64,
                 group_id: row.get(4)?,
+                revision: row.get(5)?,
             })
         })
         .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
@@ -516,7 +534,7 @@ pub fn list_tag_groups(repository_root: &Path) -> Result<Vec<TagGroup>, String> 
     let connection = open(repository_root)?;
     let mut statement = connection
         .prepare(
-            "SELECT id, name, category, parent_id FROM tag_groups
+            "SELECT id, name, category, parent_id, revision FROM tag_groups
              ORDER BY category, name COLLATE NOCASE, id",
         )
         .map_err(|error| format!("タググループ一覧の問い合わせを準備できませんでした: {error}"))?;
@@ -527,6 +545,7 @@ pub fn list_tag_groups(repository_root: &Path) -> Result<Vec<TagGroup>, String> 
                 name: row.get(1)?,
                 category: row.get(2)?,
                 parent_id: row.get(3)?,
+                revision: row.get(4)?,
             })
         })
         .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
@@ -590,6 +609,14 @@ pub fn create_tag_group(
         )
         .map_err(|error| format!("タググループを作成できませんでした: {error}"))?;
     let id = transaction.last_insert_rowid();
+    crate::database::record_change(
+        &transaction,
+        "tag_group",
+        &id.to_string(),
+        "created",
+        crate::database::ChangeSource::Gui,
+        &format!("タググループ「{name}」を作成"),
+    )?;
     transaction
         .commit()
         .map_err(|error| format!("タググループの作成を確定できませんでした: {error}"))?;
@@ -598,6 +625,7 @@ pub fn create_tag_group(
         name,
         category: category.to_string(),
         parent_id,
+        revision: 0,
     })
 }
 
@@ -807,6 +835,7 @@ pub fn add_tag_to_archives(
         id,
         name: name.to_string(),
         category: category.to_string(),
+        revision: 0,
     })
 }
 
@@ -842,6 +871,419 @@ pub fn remove_tag_from_archives(
                 .map_err(|error| format!("タグを外せませんでした: {error}"))?;
         }
     }
+    transaction
+        .execute(
+            "DELETE FROM tags WHERE id = ?1
+             AND NOT EXISTS (SELECT 1 FROM archive_tags WHERE tag_id = ?1)",
+            [tag_id],
+        )
+        .map_err(|error| format!("未使用のタグを整理できませんでした: {error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("タグの更新を確定できませんでした: {error}"))
+}
+
+fn begin_immediate<'a>(
+    connection: &'a mut Connection,
+    operation: &str,
+) -> Result<Transaction<'a>, String> {
+    connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("{operation}を開始できませんでした: {error}"))
+}
+
+fn conflict(entity: &str) -> String {
+    format!(
+        "{entity}は他のユーザーまたはAIによって変更されています。最新の状態を読み直してください。"
+    )
+}
+
+fn bump_rows(
+    transaction: &Transaction<'_>,
+    table: &str,
+    id_column: &str,
+    entity_ids: &[String],
+    expected_revisions: &BTreeMap<String, i64>,
+    entity: &str,
+) -> Result<(), String> {
+    for entity_id in entity_ids {
+        let expected = expected_revisions
+            .get(entity_id)
+            .ok_or_else(|| format!("{entity}の期待リビジョンが指定されていません。"))?;
+        let sql = format!(
+            "UPDATE {table} SET revision = revision + 1
+             WHERE {id_column} = ?1 AND revision = ?2"
+        );
+        let changed = transaction
+            .execute(&sql, params![entity_id, expected])
+            .map_err(|error| format!("{entity}のリビジョンを更新できませんでした: {error}"))?;
+        if changed != 1 {
+            return Err(conflict(entity));
+        }
+    }
+    Ok(())
+}
+
+pub fn set_favorite_with_revision(
+    repository_root: &Path,
+    archive_id: &str,
+    is_favorite: bool,
+    expected_revision: i64,
+) -> Result<(), String> {
+    let mut connection = open(repository_root)?;
+    let transaction = begin_immediate(&mut connection, "お気に入りの更新")?;
+    let changed = transaction
+        .execute(
+            "UPDATE archives SET is_favorite = ?1, revision = revision + 1
+             WHERE archive_id = ?2 AND revision = ?3",
+            params![is_favorite as i64, archive_id, expected_revision],
+        )
+        .map_err(|error| format!("お気に入りを更新できませんでした: {error}"))?;
+    if changed != 1 {
+        return Err(conflict("作品"));
+    }
+    crate::database::record_change(
+        &transaction,
+        "archive",
+        archive_id,
+        "favorite_changed",
+        crate::database::ChangeSource::Gui,
+        if is_favorite {
+            "お気に入りに追加"
+        } else {
+            "お気に入りから削除"
+        },
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| format!("お気に入りの更新を確定できませんでした: {error}"))
+}
+
+pub fn rename_tag_group_with_revision(
+    repository_root: &Path,
+    group_id: i64,
+    name: &str,
+    expected_revision: i64,
+) -> Result<(), String> {
+    let name = validate_group_name(name)?;
+    let mut connection = open(repository_root)?;
+    let transaction = begin_immediate(&mut connection, "タググループ名の変更")?;
+    let changed = transaction
+        .execute(
+            "UPDATE tag_groups SET name = ?1, revision = revision + 1
+             WHERE id = ?2 AND revision = ?3",
+            params![name, group_id, expected_revision],
+        )
+        .map_err(|error| format!("タググループ名を変更できませんでした: {error}"))?;
+    if changed != 1 {
+        return Err(conflict("タググループ"));
+    }
+    crate::database::record_change(
+        &transaction,
+        "tag_group",
+        &group_id.to_string(),
+        "renamed",
+        crate::database::ChangeSource::Gui,
+        &format!("グループ名を「{name}」へ変更"),
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| format!("タググループ名の変更を確定できませんでした: {error}"))
+}
+
+pub fn delete_tag_group_with_revision(
+    repository_root: &Path,
+    group_id: i64,
+    expected_revision: i64,
+) -> Result<(), String> {
+    let mut connection = open(repository_root)?;
+    let transaction = begin_immediate(&mut connection, "タググループの削除")?;
+    let occupied: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM tag_groups WHERE parent_id = ?1)
+                OR EXISTS(SELECT 1 FROM tags WHERE group_id = ?1)",
+            [group_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("タググループの内容を確認できませんでした: {error}"))?;
+    if occupied {
+        return Err(
+            "タグまたはサブグループがあるグループは削除できません。先に移動してください。"
+                .to_string(),
+        );
+    }
+    let changed = transaction
+        .execute(
+            "DELETE FROM tag_groups WHERE id = ?1 AND revision = ?2",
+            params![group_id, expected_revision],
+        )
+        .map_err(|error| format!("タググループを削除できませんでした: {error}"))?;
+    if changed != 1 {
+        return Err(conflict("タググループ"));
+    }
+    crate::database::record_change(
+        &transaction,
+        "tag_group",
+        &group_id.to_string(),
+        "deleted",
+        crate::database::ChangeSource::Gui,
+        "タググループを削除",
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| format!("タググループの削除を確定できませんでした: {error}"))
+}
+
+pub fn move_tag_with_revision(
+    repository_root: &Path,
+    tag_id: i64,
+    parent_id: Option<i64>,
+    expected_revision: i64,
+) -> Result<(), String> {
+    let mut connection = open(repository_root)?;
+    let transaction = begin_immediate(&mut connection, "タグの移動")?;
+    let category = transaction
+        .query_row("SELECT category FROM tags WHERE id = ?1", [tag_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .map_err(|error| format!("タグを確認できませんでした: {error}"))?
+        .ok_or_else(|| "移動するタグが見つかりません。".to_string())?;
+    validate_group_parent(&transaction, &category, parent_id)?;
+    let changed = transaction
+        .execute(
+            "UPDATE tags SET group_id = ?1, revision = revision + 1
+             WHERE id = ?2 AND revision = ?3",
+            params![parent_id, tag_id, expected_revision],
+        )
+        .map_err(|error| format!("タグを移動できませんでした: {error}"))?;
+    if changed != 1 {
+        return Err(conflict("タグ"));
+    }
+    crate::database::record_change(
+        &transaction,
+        "tag",
+        &tag_id.to_string(),
+        "moved",
+        crate::database::ChangeSource::Gui,
+        "タググループを変更",
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| format!("タグの移動を確定できませんでした: {error}"))
+}
+
+pub fn move_tag_group_with_revision(
+    repository_root: &Path,
+    group_id: i64,
+    parent_id: Option<i64>,
+    expected_revision: i64,
+) -> Result<(), String> {
+    let mut connection = open(repository_root)?;
+    let transaction = begin_immediate(&mut connection, "タググループの移動")?;
+    let category = transaction
+        .query_row(
+            "SELECT category FROM tag_groups WHERE id = ?1",
+            [group_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("タググループを確認できませんでした: {error}"))?
+        .ok_or_else(|| "移動するタググループが見つかりません。".to_string())?;
+    validate_group_parent(&transaction, &category, parent_id)?;
+    if let Some(parent_id) = parent_id {
+        let is_descendant: bool = transaction
+            .query_row(
+                "WITH RECURSIVE descendants(id) AS (
+                    SELECT id FROM tag_groups WHERE id = ?1
+                    UNION
+                    SELECT child.id FROM tag_groups child
+                    JOIN descendants parent ON child.parent_id = parent.id
+                 )
+                 SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?2)",
+                params![group_id, parent_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("移動先の階層を確認できませんでした: {error}"))?;
+        if is_descendant {
+            return Err("グループを自分自身または配下へ移動することはできません。".to_string());
+        }
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE tag_groups SET parent_id = ?1, revision = revision + 1
+             WHERE id = ?2 AND revision = ?3",
+            params![parent_id, group_id, expected_revision],
+        )
+        .map_err(|error| format!("タググループを移動できませんでした: {error}"))?;
+    if changed != 1 {
+        return Err(conflict("タググループ"));
+    }
+    crate::database::record_change(
+        &transaction,
+        "tag_group",
+        &group_id.to_string(),
+        "moved",
+        crate::database::ChangeSource::Gui,
+        "タググループの親を変更",
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| format!("タググループの移動を確定できませんでした: {error}"))
+}
+
+pub fn add_tag_to_archives_with_revisions(
+    repository_root: &Path,
+    archive_ids: &[String],
+    category: &str,
+    name: &str,
+    expected_revisions: &BTreeMap<String, i64>,
+) -> Result<TagSummary, String> {
+    if !TAG_CATEGORIES.contains(&category) {
+        return Err("タグの分類が不正です。".to_string());
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("タグ名を入力してください。".to_string());
+    }
+    if name.chars().count() > MAX_TAG_NAME_CHARS {
+        return Err(format!(
+            "タグ名は{MAX_TAG_NAME_CHARS}文字以内にしてください。"
+        ));
+    }
+    let archive_ids = archive_ids
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if archive_ids.is_empty() {
+        return Err("タグを付ける作品が選択されていません。".to_string());
+    }
+
+    let mut connection = open(repository_root)?;
+    let transaction = begin_immediate(&mut connection, "タグの更新")?;
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO tags (name, category) VALUES (?1, ?2)",
+            params![name, category],
+        )
+        .map_err(|error| format!("タグを作成できませんでした: {error}"))?;
+    let (tag_id, tag_revision): (i64, i64) = transaction
+        .query_row(
+            "SELECT id, revision FROM tags WHERE name = ?1 AND category = ?2",
+            params![name, category],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| format!("タグを確認できませんでした: {error}"))?;
+    bump_rows(
+        &transaction,
+        "archives",
+        "archive_id",
+        &archive_ids,
+        expected_revisions,
+        "作品",
+    )?;
+    for archive_id in &archive_ids {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO archive_tags (archive_id, tag_id) VALUES (?1, ?2)",
+                params![archive_id, tag_id],
+            )
+            .map_err(|error| format!("タグを付けられませんでした: {error}"))?;
+        crate::database::record_change(
+            &transaction,
+            "archive",
+            archive_id,
+            "tag_added",
+            crate::database::ChangeSource::Gui,
+            &format!("タグ「{name}」を追加"),
+        )?;
+    }
+    transaction
+        .execute(
+            "UPDATE tags SET revision = revision + 1 WHERE id = ?1 AND revision = ?2",
+            params![tag_id, tag_revision],
+        )
+        .map_err(|error| format!("タグのリビジョンを更新できませんでした: {error}"))?;
+    crate::database::record_change(
+        &transaction,
+        "tag",
+        &tag_id.to_string(),
+        "linked",
+        crate::database::ChangeSource::Gui,
+        &format!("タグ「{name}」を作品へ追加"),
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| format!("タグの更新を確定できませんでした: {error}"))?;
+    Ok(TagSummary {
+        id: tag_id,
+        name: name.to_string(),
+        category: category.to_string(),
+        revision: tag_revision + 1,
+    })
+}
+
+pub fn remove_tag_from_archives_with_revisions(
+    repository_root: &Path,
+    archive_ids: &[String],
+    tag_id: i64,
+    expected_revisions: &BTreeMap<String, i64>,
+    expected_tag_revision: i64,
+) -> Result<(), String> {
+    let archive_ids = archive_ids
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if archive_ids.is_empty() {
+        return Err("タグを外す作品が選択されていません。".to_string());
+    }
+    let mut connection = open(repository_root)?;
+    let transaction = begin_immediate(&mut connection, "タグの更新")?;
+    bump_rows(
+        &transaction,
+        "archives",
+        "archive_id",
+        &archive_ids,
+        expected_revisions,
+        "作品",
+    )?;
+    for archive_id in &archive_ids {
+        transaction
+            .execute(
+                "DELETE FROM archive_tags WHERE archive_id = ?1 AND tag_id = ?2",
+                params![archive_id, tag_id],
+            )
+            .map_err(|error| format!("タグを外せませんでした: {error}"))?;
+        crate::database::record_change(
+            &transaction,
+            "archive",
+            archive_id,
+            "tag_removed",
+            crate::database::ChangeSource::Gui,
+            "タグを削除",
+        )?;
+    }
+    let tag_changed = transaction
+        .execute(
+            "UPDATE tags SET revision = revision + 1 WHERE id = ?1 AND revision = ?2",
+            params![tag_id, expected_tag_revision],
+        )
+        .map_err(|error| format!("タグのリビジョンを更新できませんでした: {error}"))?;
+    if tag_changed != 1 {
+        return Err(conflict("タグ"));
+    }
+    crate::database::record_change(
+        &transaction,
+        "tag",
+        &tag_id.to_string(),
+        "unlinked",
+        crate::database::ChangeSource::Gui,
+        "タグを作品から削除",
+    )?;
     transaction
         .execute(
             "DELETE FROM tags WHERE id = ?1
