@@ -1,7 +1,7 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::path::Path;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 10;
+pub const CURRENT_SCHEMA_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeSource {
@@ -404,6 +404,26 @@ pub fn initialize(path: &Path) -> Result<u64, String> {
             .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
     }
 
+    let current = connection
+        .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+        .map_err(|error| format!("SQLiteスキーマバージョンを読み取れませんでした: {error}"))?;
+    if current < 11 {
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("SQLiteスキーマの更新を開始できませんでした: {error}"))?;
+        transaction
+            .execute_batch(
+                "
+                DROP TABLE IF EXISTS search_index;
+                PRAGMA user_version = 11;
+                ",
+            )
+            .map_err(|error| format!("SQLiteスキーマをv11へ更新できませんでした: {error}"))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("SQLiteスキーマの更新を確定できませんでした: {error}"))?;
+    }
+
     connection
         .query_row("SELECT COUNT(*) FROM archives", [], |row| {
             row.get::<_, u64>(0)
@@ -468,6 +488,54 @@ mod tests {
             )
             .expect("read archive revision");
         assert_eq!(revision, 0);
+    }
+
+    #[test]
+    fn migrates_v10_search_index_without_losing_archives_or_tags() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        let database_path = repository.path().join("library.sqlite3");
+        initialize(&database_path).expect("initialize database");
+        let connection = Connection::open(&database_path).expect("open database");
+        connection
+            .execute_batch(
+                "
+                INSERT INTO archives (archive_id, original_filename, relative_path, format, file_size, imported_at)
+                VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'legacy.cbz', 'archives/aa/legacy.cbz', 'cbz', 42, '2026-10-24');
+                INSERT INTO tags (id, name, category) VALUES (7, 'Existing author', 'author');
+                INSERT INTO archive_tags VALUES
+                    ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 7);
+                CREATE VIRTUAL TABLE search_index USING fts5(
+                    archive_id UNINDEXED, content='archives', content_rowid='rowid',
+                    original_filename, tag_name
+                );
+                INSERT INTO search_index (archive_id, original_filename, tag_name)
+                VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'legacy.cbz', 'Existing author');
+                PRAGMA user_version = 10;
+                ",
+            )
+            .expect("create legacy index");
+        drop(connection);
+
+        assert_eq!(initialize(&database_path).expect("migrate v10 database"), 1);
+        assert_eq!(
+            initialize(&database_path).expect("reopen migrated database"),
+            1
+        );
+        let connection = Connection::open(database_path).expect("open migrated database");
+        let (index_count, linked_count): (i64, i64) = connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM sqlite_master WHERE name = 'search_index'),
+                    (SELECT COUNT(*) FROM archive_tags x JOIN tags t ON t.id = x.tag_id
+                     JOIN archives a ON a.archive_id = x.archive_id
+                     WHERE t.name = 'Existing author' AND a.original_filename = 'legacy.cbz')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read migrated data");
+        assert_eq!((index_count, linked_count), (0, 1));
     }
 
     #[test]

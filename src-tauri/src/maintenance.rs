@@ -430,21 +430,6 @@ fn unmanage_archive(
             );
         }
 
-        let fts_exists = transaction
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_index'",
-                [],
-                |_| Ok(()),
-            )
-            .optional()
-            .unwrap_or(None)
-            .is_some();
-        if fts_exists {
-            transaction
-                .execute("DELETE FROM search_index WHERE archive_id = ?1", [archive_id])
-                .map_err(|error| format!("検索インデックスを削除できませんでした: {error}"))?;
-        }
-
         transaction
             .execute(
                 "DELETE FROM tags
@@ -986,6 +971,94 @@ mod tests {
             connection
                 .query_row("SELECT COUNT(*) FROM archive_tags", [], |row| row
                     .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn moves_archive_after_migrating_legacy_search_index() {
+        let repo = repository_with_archive();
+        let downloads = tempfile::tempdir().expect("downloads directory");
+        let id = "ab".repeat(32);
+        let connection = Connection::open(repo.path().join("database/library.sqlite3")).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO tags (id, name, category) VALUES (7, 'Existing author', 'author');
+                 INSERT INTO archive_tags SELECT archive_id, 7 FROM archives;
+                 CREATE VIRTUAL TABLE search_index USING fts5(
+                     archive_id UNINDEXED, content='archives', content_rowid='rowid',
+                     original_filename, tag_name
+                 );
+                 INSERT INTO search_index (archive_id, original_filename, tag_name)
+                 SELECT archive_id, original_filename, 'Existing author' FROM archives;
+                 PRAGMA user_version = 10;",
+            )
+            .unwrap();
+        drop(connection);
+        repository::open(repo.path()).expect("migrate and open repository");
+        let matches = crate::library::list_archives(
+            repo.path(),
+            &crate::library::ArchiveQuery {
+                search: Some("isting auth".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("search migrated tag");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].archive_id, id);
+
+        let summary =
+            unmanage_archives(repo.path(), downloads.path(), std::slice::from_ref(&id)).unwrap();
+        assert_eq!(
+            (summary.moved, summary.failed),
+            (1, 0),
+            "{:?}",
+            summary.failures
+        );
+        assert_eq!(
+            fs::read(downloads.path().join("book.cbz")).unwrap(),
+            b"data"
+        );
+        assert!(!repo.path().join("archives/ab/book.cbz").exists());
+        assert!(!repo.path().join("thumbnails/ab/x.webp").exists());
+    }
+
+    #[test]
+    fn restores_files_when_database_removal_fails() {
+        let repo = repository_with_archive();
+        let downloads = tempfile::tempdir().expect("downloads directory");
+        let id = "ab".repeat(32);
+        let connection = Connection::open(repo.path().join("database/library.sqlite3")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_archive_delete BEFORE DELETE ON archives
+                 BEGIN SELECT RAISE(ABORT, 'delete rejected'); END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let summary =
+            unmanage_archives(repo.path(), downloads.path(), std::slice::from_ref(&id)).unwrap();
+        assert_eq!((summary.moved, summary.failed), (0, 1));
+        assert!(summary.failures[0].contains("delete rejected"));
+        assert_eq!(
+            fs::read(repo.path().join("archives/ab/book.cbz")).unwrap(),
+            b"data"
+        );
+        assert_eq!(
+            fs::read(repo.path().join("thumbnails/ab/x.webp")).unwrap(),
+            b"img"
+        );
+        assert!(!downloads.path().join("book.cbz").exists());
+        let connection = Connection::open(repo.path().join("database/library.sqlite3")).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM archives WHERE archive_id = ?1",
+                    [&id],
+                    |row| row.get::<_, i64>(0)
+                )
                 .unwrap(),
             1
         );

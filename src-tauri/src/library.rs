@@ -224,83 +224,39 @@ pub fn list_archives(
     };
 
     let (sql, search_param) = if let Some(search_term) = search {
-        let fts_exists = connection
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_index'",
-                [],
-                |_| Ok(()),
+        let search_condition = "AND (
+            a.original_filename LIKE :search ESCAPE '\\'
+            OR EXISTS (
+                SELECT 1 FROM archive_tags x
+                JOIN tags t ON t.id = x.tag_id
+                WHERE x.archive_id = a.archive_id AND t.name LIKE :search ESCAPE '\\'
             )
-            .optional()
-            .map_err(|error| format!("検索インデックスを確認できませんでした: {error}"))?
-            .is_some();
-
-        if fts_exists
-            && search_term
-                .chars()
-                .all(|character| character.is_alphanumeric() || character.is_whitespace())
-        {
-            let fts_query = format!("{search_term}*");
-            let sql = if query.recent_only {
-                format!(
-                    "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
-                            a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
-                            a.thumbnail_relative_path IS NOT NULL, a.revision
-                     FROM archives a
-                     WHERE (:favorites = 0 OR a.is_favorite = 1)
-                       {tag_filter}
-                       AND a.archive_id IN (
-                           SELECT archive_id FROM search_index
-                           WHERE search_index MATCH :search
-                       )
-                     ORDER BY a.imported_at DESC, a.archive_id ASC
-                     LIMIT {RECENT_LIMIT}"
-                )
-            } else {
-                format!(
-                    "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
-                            a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
-                            a.thumbnail_relative_path IS NOT NULL, a.revision
-                     FROM archives a
-                     WHERE (:favorites = 0 OR a.is_favorite = 1)
-                       {tag_filter}
-                       AND a.archive_id IN (
-                           SELECT archive_id FROM search_index
-                           WHERE search_index MATCH :search
-                       )
-                     ORDER BY {order_by}
-                     "
-                )
-            };
-            (sql, Some(fts_query))
+        )";
+        let sql = if query.recent_only {
+            format!(
+                "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
+                        a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
+                        a.thumbnail_relative_path IS NOT NULL, a.revision
+                 FROM archives a
+                 WHERE (:favorites = 0 OR a.is_favorite = 1)
+                   {tag_filter}
+                   {search_condition}
+                 ORDER BY a.imported_at DESC, a.archive_id ASC
+                 LIMIT {RECENT_LIMIT}"
+            )
         } else {
-            let escaped = escape_like(search_term);
-            let sql = if query.recent_only {
-                format!(
-                    "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
-                            a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
-                            a.thumbnail_relative_path IS NOT NULL, a.revision
-                     FROM archives a
-                     WHERE (:favorites = 0 OR a.is_favorite = 1)
-                       {tag_filter}
-                       AND a.original_filename LIKE :search ESCAPE '\\'
-                     ORDER BY a.imported_at DESC, a.archive_id ASC
-                     LIMIT {RECENT_LIMIT}"
-                )
-            } else {
-                format!(
-                    "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
-                            a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
-                            a.thumbnail_relative_path IS NOT NULL, a.revision
-                     FROM archives a
-                     WHERE (:favorites = 0 OR a.is_favorite = 1)
-                       {tag_filter}
-                       AND a.original_filename LIKE :search ESCAPE '\\'
-                     ORDER BY {order_by}
-                     "
-                )
-            };
-            (sql, Some(escaped))
-        }
+            format!(
+                "SELECT a.archive_id, a.original_filename, a.format, a.page_count, a.file_size,
+                        a.imported_at, a.last_read_at, a.read_count, a.is_favorite,
+                        a.thumbnail_relative_path IS NOT NULL, a.revision
+                 FROM archives a
+                 WHERE (:favorites = 0 OR a.is_favorite = 1)
+                   {tag_filter}
+                   {search_condition}
+                 ORDER BY {order_by}"
+            )
+        };
+        (sql, Some(escape_like(search_term)))
     } else {
         let sql = if query.recent_only {
             format!(
@@ -1600,8 +1556,25 @@ mod tests {
         assert_eq!(search("100%"), ["Alpha_100%.cbz"]);
         assert!(search("%").len() == 1, "the percent sign is not a wildcard");
         assert!(search("_").len() == 1, "the underscore is not a wildcard");
-        add_tag(repository.path(), &id(2), "author", "山田太郎").expect("tag");
+        assert_eq!(search("lph"), ["Alpha_100%.cbz"]);
+        let tag = add_tag(repository.path(), &id(2), "author", "山田太郎 100%").expect("tag");
         assert_eq!(search("山田"), ["Gamma.7z"]);
+        assert_eq!(search("田太"), ["Gamma.7z"]);
+        assert_eq!(search("太郎 100%"), ["Gamma.7z"]);
+        assert!(search("太郎 100_").is_empty());
+        assert_eq!(
+            names(
+                repository.path(),
+                &ArchiveQuery {
+                    search: Some("田太".to_string()),
+                    recent_only: true,
+                    ..Default::default()
+                }
+            ),
+            ["Gamma.7z"]
+        );
+        remove_tag(repository.path(), &id(2), tag.id).expect("remove tag");
+        assert!(search("田太").is_empty());
     }
 
     #[test]

@@ -848,9 +848,6 @@ fn register(
             params![new_id, old_id],
         )?;
 
-        // FTS5テーブルはコンテンツテーブル(archives)と同期するため、
-        // archives行の削除時に自動で同期される。手動操作は不要・不可。
-
         transaction.execute("DELETE FROM archive_tags WHERE archive_id = ?1", [old_id])?;
         transaction.execute("DELETE FROM archives WHERE archive_id = ?1", [old_id])?;
         Ok(())
