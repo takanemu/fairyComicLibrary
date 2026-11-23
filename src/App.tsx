@@ -410,6 +410,7 @@ function App() {
     setMcpChanges([]);
     let active = true;
     let unlisten: (() => void) | undefined;
+    let notificationTimer: number | undefined;
     const refreshRevision = async () => {
       try {
         const revision = await invoke<number>("get_change_revision");
@@ -435,7 +436,8 @@ function App() {
     void refreshRevision();
     void listen("library-changed", () => {
       if (active) {
-        void refreshRevision();
+        window.clearTimeout(notificationTimer);
+        notificationTimer = window.setTimeout(() => void refreshRevision(), 100);
       }
     })
       .then((stop) => {
@@ -451,6 +453,7 @@ function App() {
     return () => {
       active = false;
       window.clearInterval(timer);
+      window.clearTimeout(notificationTimer);
       unlisten?.();
     };
   }, [repository?.path, bumpVersion]);

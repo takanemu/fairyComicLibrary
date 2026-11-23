@@ -1016,37 +1016,58 @@ pub fn move_tag_with_revision(
     expected_revision: i64,
     source: crate::database::ChangeSource,
 ) -> Result<(), String> {
-    let mut connection = open(repository_root)?;
-    let transaction = begin_immediate(&mut connection, "タグの移動")?;
-    let category = transaction
-        .query_row("SELECT category FROM tags WHERE id = ?1", [tag_id], |row| {
-            row.get::<_, String>(0)
-        })
-        .optional()
-        .map_err(|error| format!("タグを確認できませんでした: {error}"))?
-        .ok_or_else(|| "移動するタグが見つかりません。".to_string())?;
-    validate_group_parent(&transaction, &category, parent_id)?;
-    let changed = transaction
-        .execute(
-            "UPDATE tags SET group_id = ?1, revision = revision + 1
-             WHERE id = ?2 AND revision = ?3",
-            params![parent_id, tag_id, expected_revision],
-        )
-        .map_err(|error| format!("タグを移動できませんでした: {error}"))?;
-    if changed != 1 {
-        return Err(conflict("タグ"));
-    }
-    crate::database::record_change(
-        &transaction,
-        "tag",
-        &tag_id.to_string(),
-        "moved",
+    move_tags_with_revisions(
+        repository_root,
+        &[(tag_id, parent_id, expected_revision)],
         source,
-        "タググループを変更",
-    )?;
+    )
+}
+
+pub fn move_tags_with_revisions(
+    repository_root: &Path,
+    moves: &[(i64, Option<i64>, i64)],
+    source: crate::database::ChangeSource,
+) -> Result<(), String> {
+    if moves.is_empty() {
+        return Err("移動するタグが指定されていません。".to_string());
+    }
+    let mut connection = open(repository_root)?;
+    let transaction = begin_immediate(&mut connection, "タグの一括移動")?;
+    let mut seen = HashSet::new();
+    for (tag_id, parent_id, expected_revision) in moves {
+        if !seen.insert(*tag_id) {
+            return Err(format!("タグID {tag_id} が複数回指定されています。"));
+        }
+        let category = transaction
+            .query_row("SELECT category FROM tags WHERE id = ?1", [tag_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(|error| format!("タグを確認できませんでした: {error}"))?
+            .ok_or_else(|| "移動するタグが見つかりません。".to_string())?;
+        validate_group_parent(&transaction, &category, *parent_id)?;
+        let changed = transaction
+            .execute(
+                "UPDATE tags SET group_id = ?1, revision = revision + 1
+                 WHERE id = ?2 AND revision = ?3",
+                params![parent_id, tag_id, expected_revision],
+            )
+            .map_err(|error| format!("タグを移動できませんでした: {error}"))?;
+        if changed != 1 {
+            return Err(conflict("タグ"));
+        }
+        crate::database::record_change(
+            &transaction,
+            "tag",
+            &tag_id.to_string(),
+            "moved",
+            source,
+            "タググループを変更",
+        )?;
+    }
     transaction
         .commit()
-        .map_err(|error| format!("タグの移動を確定できませんでした: {error}"))
+        .map_err(|error| format!("タグの一括移動を確定できませんでした: {error}"))
 }
 
 pub fn move_tag_group_with_revision(

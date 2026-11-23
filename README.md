@@ -129,6 +129,7 @@ Claude Desktopの設定例:
 2. 更新ツールへその値を`expectedRevision`または`expectedRevisions`として渡します。
 3. `isError`が`true`で競合エラーの場合は、対象を再読込してユーザーへ変更内容を確認してから再実行します。
 4. 複数作品のタグ追加・削除は同じリクエストで行い、部分成功を前提にせずトランザクション単位で扱います。
+5. 複数タグのグループ整理は`move_tags`を使い、まとめて1トランザクションで更新します。
 
 MCPから公開する操作:
 
@@ -136,7 +137,7 @@ MCPから公開する操作:
 | --- | --- |
 | 参照 | `get_repository_status`、`list_archives`、`list_tags`、`list_tag_groups` |
 | 作品 | `set_favorite`、`add_tag_to_archives`、`remove_tag_from_archives` |
-| タグ・グループ | `create_tag_group`、`rename_tag_group`、`delete_tag_group`、`move_tag`、`move_tag_group` |
+| タグ・グループ | `create_tag_group`、`rename_tag_group`、`delete_tag_group`、`move_tag`、`move_tags`、`move_tag_group` |
 
 インポート、バックアップ、変換、サムネイル差し替え、管理対象外への移動、外部ビューアー起動はMCPへ公開していません。
 

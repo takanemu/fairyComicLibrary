@@ -137,6 +137,7 @@ fn is_mutating_tool(name: &str) -> bool {
             | "rename_tag_group"
             | "delete_tag_group"
             | "move_tag"
+            | "move_tags"
             | "move_tag_group"
     )
 }
@@ -216,6 +217,15 @@ fn call_tool(service: &LibraryService, name: &str, arguments: Value) -> Result<V
                 .move_tag(args.tag_id, args.parent_id, args.expected_revision)
                 .map(|_| Value::Null)
         }
+        "move_tags" => {
+            let args: MoveTagsArgs = parse(arguments, name)?;
+            let moves = args
+                .moves
+                .into_iter()
+                .map(|item| (item.tag_id, item.parent_id, item.expected_revision))
+                .collect::<Vec<_>>();
+            service.move_tags(&moves).map(|_| Value::Null)
+        }
         "move_tag_group" => {
             let args: MoveGroupArgs = parse(arguments, name)?;
             service
@@ -282,6 +292,12 @@ struct MoveTagArgs {
     tag_id: i64,
     parent_id: Option<i64>,
     expected_revision: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveTagsArgs {
+    moves: Vec<MoveTagArgs>,
 }
 
 #[derive(Deserialize)]
@@ -372,6 +388,21 @@ fn tool_definitions() -> Value {
             "move_tag",
             "タグを別グループへ移動します。",
             move_schema("tagId")
+        ),
+        tool(
+            "move_tags",
+            "複数のタグを1つのトランザクションで別グループへ移動します。",
+            json!({
+                "type":"object","properties":{
+                    "moves":{"type":"array","minItems":1,"items":{
+                        "type":"object","properties":{
+                            "tagId":{"type":"integer"},
+                            "parentId":{"type":["integer","null"]},
+                            "expectedRevision":{"type":"integer"}
+                        },"required":["tagId","expectedRevision"],"additionalProperties":false
+                    }}
+                },"required":["moves"],"additionalProperties":false
+            })
         ),
         tool(
             "move_tag_group",
@@ -527,6 +558,76 @@ mod tests {
         assert!(move_tag["inputSchema"]["required"]
             .as_array()
             .is_some_and(|required| required.contains(&json!("tagId"))));
+    }
+
+    #[test]
+    fn move_tags_is_atomic_and_uses_one_tool_call() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        std::fs::create_dir_all(repository.path().join("database"))
+            .expect("create database directory");
+        let database_path = repository.path().join("database/library.sqlite3");
+        database::initialize(&database_path).expect("initialize database");
+        let connection = Connection::open(&database_path).expect("open database");
+        connection
+            .execute(
+                "INSERT INTO tag_groups (id, name, category) VALUES (1, 'Grouped', 'author')",
+                [],
+            )
+            .expect("insert group");
+        connection
+            .execute(
+                "INSERT INTO tags (id, name, category) VALUES (1, 'One', 'author'),
+                 (2, 'Two', 'author')",
+                [],
+            )
+            .expect("insert tags");
+        drop(connection);
+        let service = LibraryService::for_mcp(repository.path().to_path_buf());
+
+        let conflict = call_tool(
+            &service,
+            "move_tags",
+            json!({
+                "moves": [
+                    {"tagId": 1, "parentId": 1, "expectedRevision": 0},
+                    {"tagId": 2, "parentId": 1, "expectedRevision": 1}
+                ]
+            }),
+        )
+        .expect_err("stale batch must conflict");
+        assert!(conflict.contains("他のユーザーまたはAI"));
+
+        let connection = Connection::open(&database_path).expect("reopen database");
+        let unchanged: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE group_id IS NULL AND revision = 0",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read rolled back tags");
+        assert_eq!(unchanged, 2);
+        drop(connection);
+
+        call_tool(
+            &service,
+            "move_tags",
+            json!({
+                "moves": [
+                    {"tagId": 1, "parentId": 1, "expectedRevision": 0},
+                    {"tagId": 2, "parentId": 1, "expectedRevision": 0}
+                ]
+            }),
+        )
+        .expect("batch move");
+        let connection = Connection::open(database_path).expect("reopen database");
+        let moved: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE group_id = 1 AND revision = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read moved tags");
+        assert_eq!(moved, 2);
     }
 
     #[test]

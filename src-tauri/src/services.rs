@@ -127,6 +127,10 @@ impl LibraryService {
         )
     }
 
+    pub fn move_tags(&self, moves: &[(i64, Option<i64>, i64)]) -> Result<(), String> {
+        library::move_tags_with_revisions(&self.repository_root, moves, self.change_source)
+    }
+
     pub fn move_tag_group(
         &self,
         group_id: i64,
